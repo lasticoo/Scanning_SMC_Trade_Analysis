@@ -73,11 +73,13 @@ class Config:
     fetch_derivatives: bool = True  # ambil Open Interest & Long/Short Ratio publik
     # evaluasi Full LLM (Groq)
     ai_audit: bool = True
-    ai_top_n: int = 15
-    # filter & radar lokasi harga di Demand/Supply/POI/Sweep
+    ai_top_n: int = 10
+    # filter & radar lokasi harga di Demand/Supply/POI/Sweep + Pre-Reaction Stalker
     only_in_zone: bool = False      # tampilkan hanya koin yang sudah di/dekat POI atau baru saja sweep
     radar_mode: bool = False        # fokus tampilan Radar Zona & Liquidity Sweep Live
     near_poi_pct: float = 0.50      # radius % dari bibir zona untuk status APPROACHING_POI
+    max_stalk_atr_1h: float = 1.65  # batas jarak pendekatan Pre-Reaction (maks ~1-4 jam perjalanan harga)
+    max_stalk_pct: float = 2.60     # batas jarak % maksimal menuju Fresh POI agar tidak menunggu lama
 
 
 @dataclass
@@ -163,15 +165,23 @@ class Setup:
     retail_ls_ratio: float = NAN
     orderflow_summary: str = ""
     # Detektor Lokasi Harga Live (Demand / Supply / POI OB-FVG-Breaker / Liquidity Sweep)
-    zone_state: str = ""            # SWEEP_IN_POI, IN_POI_REJECTING, IN_POI_TESTING, LIQ_SWEPT, APPROACHING_POI, WAITING_PULLBACK
+    zone_state: str = ""            # SWEEP_IN_POI, FIRST_TOUCH_NOW, IN_POI_REJECTING, IN_POI_TESTING, PRE_TAP_NEAR, PRE_TAP_STALK, LIQ_SWEPT, POST_BOUNCE_WAIT
     zone_badge: str = ""            # label ringkas status zona & jarak untuk tabel utama
     dist_to_poi_pct: float = NAN    # 0.0% jika harga sudah di dalam [poi_low, poi_high]
     zone_depth_pct: float = NAN     # 0..100% kedalaman penetrasi harga/wick di dalam zona POI
     zone_fresh: bool = False        # apakah POI masih segar (unmitigated / sentuhan pertama)
     sweep_status: str = ""          # status BSL/SSL/EQH/EQL/IDM/Asian sweep terkini
-    zone_reaction: str = ""         # REJECTING / TESTING / MENUNGGU SENTUHAN + bukti candle/CVD
+    zone_reaction: str = ""         # REJECTING / TESTING / PRE-TAP / MENUNGGU SENTUHAN + bukti candle/CVD
     active_zones_summary: str = ""  # ringkasan seluruh Demand/Supply/OB/FVG 4H-1H-15M yang sedang disentuh/dekat
     eq_magnet_info: str = ""        # kolam EQH/EQL/IDM terdekat yang belum tersapu
+    # Variasi Setup Dinamis (Trend Cont vs Pre-Reaction vs HTF Reversal) & Forward Playbook
+    archetype: str = "TREND_CONT"   # TREND_CONT, PRE_REACTION, HTF_REVERSAL, BREAKOUT
+    archetype_label: str = ""       # label variasi setup
+    exec_style: str = ""            # ENTRY_NOW, LIMIT_PRE_TAP, WAIT_SWEEP_TRIGGER, LIMIT_RETEST
+    approach_style: str = ""        # KOMPRESI / KOREKTIF, PULLBACK WAJAR, IMPULSIF LIAR, SUDAH MEMANTUL
+    est_tap_hours: float = NAN      # estimasi jam menuju bibir POI (untuk Pre-Reaction / Stalking)
+    forward_playbook: str = ""      # panduan langkah ke depan (Skenario Utama If-Then)
+    flip_scenario: str = ""         # skenario antisipasi jika zona jebol impulsif (Breaker Flip)
     # internal (disimpan untuk state retest breakout)
     q_pts: float = 0.0
     body_pts: float = 0.0

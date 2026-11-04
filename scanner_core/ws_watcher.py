@@ -33,9 +33,9 @@ from .models import Setup, ZoneRadarHit, fp
 class SetupWatchState:
     def __init__(self, setup: Setup):
         self.s = setup
-        in_now = getattr(setup, "zone_state", "") in ("SWEEP_IN_POI", "IN_POI_REJECTING", "IN_POI_TESTING")
+        in_now = getattr(setup, "zone_state", "") in ("FIRST_TOUCH_NOW", "SWEEP_IN_POI", "IN_POI_REJECTING", "IN_POI_TESTING")
         self.poi_tapped = bool(setup.confirmed) or in_now
-        self.near_alerted = in_now or getattr(setup, "zone_state", "") == "APPROACHING_POI"
+        self.near_alerted = in_now or getattr(setup, "zone_state", "") in ("APPROACHING_POI", "PRE_TAP_NEAR")
         self.poi_alerted = False
         self.ce_alerted = False
         self.tp1_alerted = False
@@ -74,7 +74,7 @@ async def watch_setups_realtime(
     """
     active_list = [
         s for s in setups
-        if (s.status == "ENTRY READY" or s.status.startswith("WATCHLIST"))
+        if (s.status in ("ENTRY READY", "PRE-TAP LIMIT", "REVERSAL WATCH") or s.status.startswith("WATCHLIST"))
         and not math.isnan(s.poi_low)
         and not math.isnan(s.poi_high)
         and not math.isnan(s.sl)
@@ -231,8 +231,9 @@ async def watch_setups_realtime(
                             st.poi_tapped = True
                             st.poi_alerted = True
                             fr_tag = " [Fresh POI]" if getattr(s, "zone_fresh", False) else ""
+                            tac_tag = f" [{s.status} | {getattr(s, 'exec_style', '')}]" if getattr(s, "status", "") else ""
                             emit(
-                                f"🎯 [POI TAPPED]{fr_tag} {sym} ({s.direction} | {s.pattern}) masuk zona [{fp(s.poi_low)} - {fp(s.poi_high)}] "
+                                f"🎯 [POI TAPPED]{fr_tag}{tac_tag} {sym} ({s.direction} | {s.pattern}) masuk zona [{fp(s.poi_low)} - {fp(s.poi_high)}] "
                                 f"di {fp(p)}! SL {fp(s.sl)} | TP1 {fp(s.tp1)} | TP2 {fp(s.tp2)} (RR 1:{s.rr:.1f})"
                             )
 

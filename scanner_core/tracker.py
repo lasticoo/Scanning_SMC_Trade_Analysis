@@ -105,9 +105,8 @@ def simulate_trade_on_bars(
             # Batal jika harga sudah tembus SL atau sudah menyentuh TP1 sebelum jemput limit
             if (is_long and (l[idx] <= sl or h[idx] >= tp1)) or (not is_long and (h[idx] >= sl or l[idx] <= tp1)):
                 return {"outcome": "UNFILLED", "realized_r": 0.0, "hold_hours": 0.0, "tp1_hit": False}
-            if l[idx] <= poi_high and h[idx] >= poi_low:
-                actual_entry = (poi_low + poi_high) / 2.0
-                actual_entry = max(l[idx], min(h[idx], actual_entry))
+            if (is_long and l[idx] <= entry_price) or (not is_long and h[idx] >= entry_price):
+                actual_entry = min(float(o[idx]), entry_price) if is_long else max(float(o[idx]), entry_price)
                 start_bar = idx
                 filled = True
                 break
@@ -300,9 +299,12 @@ async def _track_signals_async(
         return "Tidak ada file CSV dengan skema sinyal valid.", pd.DataFrame()
 
     all_df = pd.concat(frames, ignore_index=True)
-    allowed_status = ["ENTRY READY"]
     if include_watchlist:
-        mask = all_df["status"].astype(str).str.startswith("WATCHLIST") | (all_df["status"] == "ENTRY READY")
+        st_col = all_df["status"].astype(str)
+        mask = (
+            st_col.isin(["ENTRY READY", "PRE-TAP LIMIT", "REVERSAL WATCH"])
+            | st_col.str.startswith("WATCHLIST")
+        )
     else:
         mask = all_df["status"] == "ENTRY READY"
     cand_df = all_df[mask].copy()
@@ -350,7 +352,7 @@ async def _track_signals_async(
             tp2_p = float(row["tp2"])
             z_lo, z_hi = _parse_zone_bounds(str(row.get("entry_zone", "")), entry_p)
             status_str = str(row["status"])
-            need_limit = status_str.startswith("WATCHLIST")
+            need_limit = status_str != "ENTRY READY"
 
             is_complete = (server_ms - after_close_ms) >= max_hold_hours * 3_600_000
             sim = simulate_trade_on_bars(
@@ -424,6 +426,7 @@ async def _backtest_symbol_walk_forward(
     server_ms: int,
     step_bars_15m: int = 4,
     fee_pct: float = 0.04,
+    include_pretap: bool = False,
 ) -> List[dict]:
     bars_15m_test = max(96, int(days * 96))
     need_15m = bars_15m_test + cfg.limit_15m
@@ -481,8 +484,10 @@ async def _backtest_symbol_walk_forward(
             else:
                 setup = s1 or s2
 
-        if setup and setup.status == "ENTRY READY":
-            fut_df = df15.iloc[t + 1 : min(len(df15), t + 1 + max_hold_bars + 16)]
+        valid_bt_statuses = ("ENTRY READY", "PRE-TAP LIMIT") if include_pretap else ("ENTRY READY",)
+        if setup and setup.status in valid_bt_statuses:
+            is_limit_pre = setup.status == "PRE-TAP LIMIT"
+            fut_df = df15.iloc[t + 1 : min(len(df15), t + 1 + max_hold_bars + 18)]
             sim = simulate_trade_on_bars(
                 direction=setup.direction,
                 entry_price=setup.entry,
@@ -491,7 +496,7 @@ async def _backtest_symbol_walk_forward(
                 sl=setup.sl,
                 tp1=setup.tp1,
                 tp2=setup.tp2,
-                require_limit_tap=False,
+                require_limit_tap=is_limit_pre,
                 future_df=fut_df,
                 max_hold_hours=cfg.max_hold_hours,
                 fee_pct=fee_pct,
@@ -502,6 +507,7 @@ async def _backtest_symbol_walk_forward(
                     "signal_utc": setup.candle_time,
                     "symbol": symbol,
                     "direction": setup.direction,
+                    "archetype": setup.archetype,
                     "kind": setup.kind,
                     "pattern": setup.pattern,
                     "status": setup.status,
@@ -535,6 +541,7 @@ async def _run_backtest_async(
     max_symbols: int = 15,
     out_dir: str = "scan_output",
     fee_pct: float = 0.04,
+    include_pretap: bool = False,
 ) -> Tuple[str, pd.DataFrame]:
     async with AsyncBinance(concurrency=min(16, max(4, cfg.workers))) as api:
         server_ms = await api.server_time()
@@ -550,7 +557,7 @@ async def _run_backtest_async(
         all_trades: List[dict] = []
         batches = await asyncio.gather(
             *(
-                _backtest_symbol_walk_forward(api, sym, meta, cfg, days, server_ms, fee_pct=fee_pct)
+                _backtest_symbol_walk_forward(api, sym, meta, cfg, days, server_ms, fee_pct=fee_pct, include_pretap=include_pretap)
                 for sym, meta in targets
             )
         )
@@ -581,5 +588,6 @@ def run_walk_forward_backtest(
     max_symbols: int = 15,
     out_dir: str = "scan_output",
     fee_pct: float = 0.04,
+    include_pretap: bool = False,
 ) -> Tuple[str, pd.DataFrame]:
-    return asyncio.run(_run_backtest_async(cfg, only_symbols, days, max_symbols, out_dir, fee_pct))
+    return asyncio.run(_run_backtest_async(cfg, only_symbols, days, max_symbols, out_dir, fee_pct, include_pretap))

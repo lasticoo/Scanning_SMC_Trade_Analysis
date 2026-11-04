@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-AI Top-Down MTF SMC Validator Module for Binance Futures Scanner
-================================================================
-Memanfaatkan LLM (Groq Cloud API) sebagai Kepala Analis Top-Down MTF SMC (4H -> 1H -> 15M):
-1. Menerima peta struktur 3 Timeframe UTUH (4H Key Ranges & Walls -> 1H Working Range, HTF OB/FVG,
-   & Estimasi Durasi Posisi -> 15M Likuiditas Kecil, Trigger, CVD Absorption, OI, & L/S Ratio).
-2. Memakai format harga adaptif presisi penuh (aman untuk altcoin mikro maupun BTC).
-3. Dilengkapi parser JSON tahan tag <think>...</think>, rate-limit pacing + backoff otomatis,
-   serta PROTEKSI SKOR 0 (jika API limit/timeout, skor & status MTF Python dipertahankan utuh).
-4. Menerapkan pagar pengaman "Zoom-Out Check" (ATR 1H) pasca-AI agar SL/TP selalu realistis,
-   serta menyinkronkan ulang risk_pct, RR, durasi, invalidasi, dan ukuran posisi (qty).
+AI Modern Crypto SMC/ICT Curator & Validator Module for Binance Futures Scanner
+===============================================================================
+Memanfaatkan LLM (Groq Cloud API) sebagai Kurator Utama Top-Down MTF SMC/ICT (4H -> 1H -> 15M)
+yang disesuaikan khusus dengan karakter liar pasar Crypto Futures:
+1. Menilai lintas 3 Variasi Setup Dinamis:
+   - TREND_CONT   : Follow-trend setelah konfirmasi reaksi di POI.
+   - PRE_REACTION : Mendekati Supply/Demand/OB SEGAR sebelum bereaksi (kurasi Limit Pre-Tap vs Tunggu Sweep).
+   - HTF_REVERSAL : Potensi keterbalikan tren saat harga mendekati/menguji Tembok Mayor 4H/1H.
+2. Menyesuaikan taktik terhadap Stop-Hunt Wick / Judas Swing kripto, kolam EQH/EQL/IDM di depan POI,
+   gaya kedatangan harga (Kompresi vs Impulsif Liar), serta menjaga jarak dekat & durasi posisi singkat.
+3. Menghasilkan Forward Playbook (Skenario Utama If-Then & Skenario Antisipasi Breaker Flip).
+4. Dilengkapi parser JSON tahan tag <think>, koneksi TLS persisten cepat, PROTEKSI SKOR 0,
+   serta pagar pengaman "Zoom-Out Check" (ATR 1H) pasca-AI.
 """
 
 from __future__ import annotations
@@ -31,8 +34,20 @@ from scanner_core.models import clamp, fp, size_position
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 _RATE_LOCK = threading.Lock()
 _LAST_CALL_TS = 0.0
-_MIN_CALL_INTERVAL = 0.45  # cegah burst 429 serentak ke Groq
-_UNAVAILABLE_MODELS: set = set()  # simpan model deprecated/404 agar tidak dicoba berulang kali
+_MIN_CALL_INTERVAL = 0.25  # pacing ringan agar paralel 4 worker cepat tanpa memicu burst 429
+_UNAVAILABLE_MODELS: set = set()
+_TLS_LOCAL = threading.local()
+
+VALID_STATUSES = ("ENTRY READY", "PRE-TAP LIMIT", "REVERSAL WATCH", "WATCHLIST", "REJECT")
+VALID_EXEC_STYLES = ("ENTRY_NOW", "LIMIT_PRE_TAP", "WAIT_SWEEP_TRIGGER", "LIMIT_RETEST", "SKIP")
+
+
+def _get_http_session() -> requests.Session:
+    sess = getattr(_TLS_LOCAL, "session", None)
+    if sess is None:
+        sess = requests.Session()
+        _TLS_LOCAL.session = sess
+    return sess
 
 
 def load_env(env_path: Optional[str] = None) -> None:
@@ -107,12 +122,19 @@ def _fmt_fvgs(fvgs: list, limit: int = 3) -> str:
 
 def build_full_llm_smc_prompt(setup: Any, btc_ctx: Optional[dict] = None) -> str:
     """
-    Menyusun prompt Top-Down MTF (4H -> 1H -> 15M) + Orderflow lengkap dengan format harga
-    adaptif (tanpa kehilangan presisi desimal) agar AI tidak menebak atau mengarang level.
+    Menyusun prompt Kurator Modern SMC/ICT Crypto Futures (4H -> 1H -> 15M) + Orderflow +
+    Konteks Variasi Setup (TREND_CONT / PRE_REACTION / HTF_REVERSAL) secara presisi.
     """
     direction = getattr(setup, "direction", "UNKNOWN")
     symbol = getattr(setup, "symbol", "")
     pattern = getattr(setup, "pattern", "")
+    archetype = getattr(setup, "archetype", "TREND_CONT")
+    arch_lbl = getattr(setup, "archetype_label", archetype)
+    exec_style = getattr(setup, "exec_style", "WAIT_SWEEP_TRIGGER")
+    app_style = getattr(setup, "approach_style", "-")
+    tap_h = getattr(setup, "est_tap_hours", 0.0)
+    tap_txt = f"~{tap_h:.1f} jam" if (isinstance(tap_h, (int, float)) and not math.isnan(tap_h) and tap_h > 0) else "Sudah di area / detik ini"
+
     entry_zone = getattr(setup, "entry_zone", "")
     plan_entry = getattr(setup, "entry", 0.0)
     sl = getattr(setup, "sl", 0.0)
@@ -162,17 +184,17 @@ def build_full_llm_smc_prompt(setup: Any, btc_ctx: Optional[dict] = None) -> str
 
     idm_lvl = raw.get("idm_level")
     idm_taken = raw.get("idm_bull_swept") if direction == "LONG" else raw.get("idm_bear_swept")
-    idm_txt = f"Level {fp(idm_lvl)} ({'SUDAH DISAPU / IDM Taken' if idm_taken else 'Belum disapu'})" if idm_lvl else "Tidak ada IDM spesifik"
+    idm_txt = f"Level {fp(idm_lvl)} ({'SUDAH DISAPU / IDM Taken' if idm_taken else 'Belum disapu — umpan likuiditas'})" if idm_lvl else "Tidak ada IDM spesifik"
 
     pins = raw.get("pin_bars", [])
-    pin_txt = ", ".join(f"{'Bull' if p['dir']==1 else 'Bear'} PinBar (wick {p['wick_pct']*100:.0f}%)" for p in pins) or "Tidak ada pin bar baru"
+    pin_txt = ", ".join(f"{'Bull' if p['dir']==1 else 'Bear'} PinBar (wick {p['wick_pct']*100:.0f}%)" for p in pins) or "Belum ada pin bar baru"
 
     sess_txt = raw.get("session", getattr(setup, "session_name", "-"))
     of_txt = raw.get("orderflow_summary", getattr(setup, "orderflow_summary", "-"))
     fund_pct = float(raw.get("funding_rate", 0.0)) * 100.0
     opp_txt = fp(opp_lvl) if opp_lvl is not None else "Belum teridentifikasi"
 
-    # Data Detektor Lokasi Harga Live (Demand/Supply/POI/Sweep/Reaction)
+    # Data Detektor Lokasi Harga Live
     z_state = getattr(setup, "zone_state", raw.get("zone_state", "-"))
     z_badge = getattr(setup, "zone_badge", raw.get("zone_badge", "-"))
     dist_poi = getattr(setup, "dist_to_poi_pct", raw.get("dist_to_poi_pct", 0.0))
@@ -189,78 +211,76 @@ def build_full_llm_smc_prompt(setup: Any, btc_ctx: Optional[dict] = None) -> str
         b4_str = "Bullish" if b4 == 1 else ("Bearish" if b4 == -1 else "Netral")
         btc_note = f"BTC 4H: {b4_str} (Referensi makro saja; altcoin dinilai 100% independen dari struktur koin sendiri)"
 
-    prompt = f"""Anda adalah Master Trader Institusional Crypto Futures spesialis Top-Down Multi-Timeframe SMC (4H -> 1H -> 15M) & Orderflow.
-Evaluasi setup berikut menggunakan kerangka Top-Down 3 Lapis tanpa keterikatan kaku pada BTC:
+    prompt = f"""Anda adalah Kurator Utama SMC/ICT Modern Crypto Futures (4H -> 1H -> 15M) & Orderflow.
+Tugas Anda adalah menilai apakah setup ini MENARIK secara SMC/ICT modern dengan menyesuaikan karakter pasar crypto yang liar (stop-hunt wick / Judas Swing), menjaga jarak tidak terlalu jauh & durasi trade singkat (Intraday / Short-Swing <= 36 jam), serta memberi langkah taktis ke depan yang jelas.
 
-[DATA REAL-TIME BINANCE FUTURES: {symbol}]
-- Harga Saat Ini: {fp(cur_p)} | Sesi Aktif: {sess_txt}
-- Arah & Setup Kandidat: {direction} — {pattern} ({'Harga sudah di area POI' if at_poi else 'Harga menunggu pullback Limit ke POI'})
-- Konteks Makro BTC: {btc_note}
+[VARIASI & KARAKTER SETUP KANDIDAT: {symbol}]
+- Harga Live: {fp(cur_p)} | Sesi: {sess_txt} | Konteks BTC: {btc_note}
+- Variasi Archetype: {archetype} ({arch_lbl}) | Arah: {direction} — {pattern}
+- Usulan Taktik Awal: {exec_style} | Gaya Kedatangan Harga ke Zona: {app_style} | Estimasi Waktu Sentuh POI: {tap_txt}
 
 [RADAR LOKASI HARGA LIVE DI DEMAND / SUPPLY / POI / LIQUIDITY SWEEP]
-- Status Lokasi Live: {z_badge} (State: {z_state} | Jarak ke POI: {dist_poi:.2f}% | Kedalaman Mitigasi Zona: {depth_txt})
-- Zona Demand/Supply/OB/FVG Aktif yang Disentuh/Dekat: {active_zones_txt}
-- Deteksi Liquidity Sweep Terkini: {sweep_live_txt} | Magnet Likuiditas Terdekat (EQH/EQL/IDM): {magnet_txt}
-- Reaksi Candle & Orderflow di Zona: {reac_live_txt}
+- Status Lokasi Live: {z_badge} (State: {z_state} | Jarak ke Bibir POI: {dist_poi:.2f}% | Kedalaman Mitigasi: {depth_txt})
+- Zona Demand/Supply/OB/FVG Aktif/Mendekat: {active_zones_txt}
+- Liquidity Sweep Terkini: {sweep_live_txt} | Magnet Kolam Likuiditas di Depan (EQH/EQL/IDM): {magnet_txt}
+- Reaksi / Dinamika Candle & CVD: {reac_live_txt}
 
 [LAPIS 1 — 4H MACRO KEY RANGES & TEMBOK BESAR]
-- Tren & Struktur 4H: {t4} | ATR 4H: {fp(atr_4h)}
-- Dealing Range 4H: {r4_str}
-- Peta Tembok 4H: {w4_str}
-- Order Blocks 4H Aktif: {obs_4h_txt}
+- Tren & Struktur 4H: {t4} | ATR 4H: {fp(atr_4h)} | Dealing Range 4H: {r4_str}
+- Peta Tembok 4H: {w4_str} | OB/Breaker 4H Aktif: {obs_4h_txt}
 
 [LAPIS 2 — 1H WORKING TRADING RANGE & DURASI POSISI]
 - Tren & Struktur 1H: {s1} | ATR 1H: {fp(atr_1h)}
-- Working Range 1H: Low {fp(r1_lo)} <-> High {fp(r1_hi)} | Equilibrium 1H: {fp(r1_eq)} | Posisi Harga: {z_pos_lbl}
-- Zona OB / Breaker 1H Aktif: {obs_1h_txt}
-- Unmitigated FVG 1H: {fvgs_1h_txt}
-- Kolam Likuiditas 1H: EQH [{eqh_1h}] | EQL [{eql_1h}]
+- Working Range 1H: Low {fp(r1_lo)} <-> High {fp(r1_hi)} | EQ 1H: {fp(r1_eq)} | Posisi: {z_pos_lbl}
+- OB/Breaker 1H: {obs_1h_txt} | FVG 1H: {fvgs_1h_txt} | EQH 1H [{eqh_1h}] | EQL 1H [{eql_1h}]
 - Estimasi Lama Posisi ke TP: {hold_lbl}
 
 [LAPIS 3 — 15M REFINEMENT, LIKUIDITAS KECIL, & ORDERFLOW]
 - ATR 15M: {fp(atr_15m)} | Event Struktur 15M: {recent_events}
-- Zona OB / Breaker 15M Aktif: {obs_15_txt}
-- Unmitigated FVG 15M: {fvgs_15_txt}
-- Likuiditas 15M: EQH [{eqh_15}] | EQL [{eql_15}] | Inducement (IDM): {idm_txt}
-- Rejection Candle: {pin_txt}
-- Data Orderflow & Derivatif Publik: {of_txt} | Funding Rate: {fund_pct:+.4f}%
+- OB/Breaker 15M: {obs_15_txt} | FVG 15M: {fvgs_15_txt} | EQH 15M [{eqh_15}] | EQL 15M [{eql_15}]
+- Inducement (IDM): {idm_txt} | Rejection Candle: {pin_txt}
+- Orderflow & Derivatif: {of_txt} | Funding Rate: {fund_pct:+.4f}%
 
 [RENCANA LEVEL TOP-DOWN & ATURAN WAJIB "ZOOM-OUT CHECK" (PROPORSIONAL 1H)]
-- Acuan Entry: {fp(plan_entry)} (Zona POI Ideal: {entry_zone})
-- Stop Loss Struktural Proporsional 1H: {fp(sl)} | TP1: {fp(tp1)} | TP2: {fp(tp2)} (R:R 1:{rr:.1f}) | Target Tembok Lawan: {opp_txt}
+- Acuan Entry: {fp(plan_entry)} (Zona POI Ideal: {entry_zone} | {'Sudah di POI' if at_poi else 'Belum di POI / Menunggu Sentuhan'})
+- Stop Loss Proporsional 1H: {fp(sl)} | TP1: {fp(tp1)} | TP2: {fp(tp2)} (R:R 1:{rr:.1f}) | Target Tembok Lawan: {opp_txt}
 - Invalidasi: {invalidation}
-- PENTING ("ZOOM-OUT CHECK"): Di crypto futures, DILARANG memasang SL sempit mikro 15M yang mudah terkena stop-hunt wick! Jarak SL dari Entry WAJIB proporsional terhadap 1H, yaitu di antara {fp(min_sl_d)} hingga {fp(max_sl_d)} (0.75x - 2.20x ATR 1H), serta TP2 tidak boleh menembus tembok besar 4H lawan. Pertahankan level SL/TP Top-Down di atas kecuali ada penyempurnaan struktural di dalam koridor tersebut.
+- ATURAN WAJIB: Jarak SL dari Entry WAJIB di antara {fp(min_sl_d)} s.d. {fp(max_sl_d)} (tahan stop-hunt wick kripto), dan TP2 dilarang menembus tembok 4H lawan.
 
-[KEPUTUSAN AKHIR]
-- "ENTRY READY": Konfluensi MTF 4H->1H->15M kuat, harga sudah dekat/di dalam POI, R:R >= 2.0, durasi wajar.
-- "WATCHLIST": Struktur & arah bagus tetapi harga masih menunggu retest ke POI 1H/15M atau menunggu trigger konfirmasi.
-- "REJECT": Melawan tembok 4H tepat di depan mata, R:R < 1.8, atau jebakan likuiditas buruk.
+[PANDUAN KURASI SMC/ICT MODERN KHUSUS CRYPTO]
+1. "ENTRY READY" (execution_style="ENTRY_NOW"): HANYA jika harga SUDAH di/sangat dekat POI DAN sudah ada bukti reaksi/sweep/shift struktur valid, R:R >= 2.0, durasi cepat.
+2. "PRE-TAP LIMIT" (execution_style="LIMIT_PRE_TAP"): Khusus setup PRE_REACTION yang mendekati Fresh Supply/Demand/OB/Breaker (unmitigated, jarak dekat <= 2.6%) dengan pendekatan KOMPRESI/KOREKTIF/WAJAR dan ada fuel likuiditas — siap pasang Limit di 50% CE sebelum harga bereaksi! (Jika harga datang terjun bebas/marubozu liar, ubah ke "WATCHLIST" + "WAIT_SWEEP_TRIGGER").
+3. "REVERSAL WATCH" (execution_style="WAIT_SWEEP_TRIGGER"): Khusus setup HTF_REVERSAL saat harga mendekati/menguji Tembok 4H/1H mayor di ekstrem range — jangan pasang limit buta melawan tren kripto, wajib tunggu Judas Swing/Sweep + 15M CHOCH/CISD!
+4. "WATCHLIST": Setup bagus namun harga sudah memantul jauh (tunggu Limit Retest) atau sedang menguji zona tanpa konfirmasi close candle.
+5. "REJECT": Zona lemah/sudah berkali-kali disentuh, menabrak tembok 4H lawan tanpa ruang R:R (< 1.8), atau durasi terlalu lama.
 
-Balas HANYA dengan JSON valid murni (tanpa teks pengantar atau markdown):
+Balas HANYA dengan JSON valid murni (tanpa markdown/pengantar). WAJIB gunakan Bahasa Indonesia yang lugas pada seluruh isi teks JSON (termasuk smc_elements, detailed_analysis, forward_playbook, dan flip_scenario):
 {{
   "smc_elements": {{
-    "order_blocks": "peta OB/Breaker 4H, 1H, dan 15M yang relevan beserta harga presisinya",
-    "liquidity_sweeps_runs": "status BSL/SSL sweep, EQH/EQL, atau Asian sweep",
-    "liquidity_range": "peta Macro Range 4H & Working Range 1H (Low, High, EQ, posisi Discount/Premium)",
-    "choch": "status CHOCH di 1H/15M",
-    "bos": "status BOS searah struktur",
-    "inducement": "level IDM spesifik dan status IDM Taken",
-    "supply_demand": "zona Supply & Demand 4H/1H dan batas tembok lawan",
-    "pin_bar": "status rejection wick & konfirmasi orderflow/CVD absorption",
-    "cisd": "status CISD & dukungan Open Interest / L-S Ratio",
-    "poi": "zona POI utama (Nested 1H+15M) beserta estimasi durasi posisi"
+    "order_blocks": "peta OB/Breaker 4H, 1H, 15M & status kesegarannya (unmitigated vs mitigated)",
+    "liquidity_sweeps_runs": "status BSL/SSL sweep atau kolam EQH/EQL umpan Judas Swing",
+    "liquidity_range": "peta Range 4H & 1H (Low, High, EQ, Discount/Premium)",
+    "choch": "status CHOCH atau syarat CHOCH yang ditunggu",
+    "bos": "status BOS & kekuatan displacement",
+    "inducement": "level IDM / likuiditas pengumpan di depan POI",
+    "supply_demand": "zona Supply/Demand 4H-1H & ruang menuju tembok lawan",
+    "pin_bar": "reaksi wick / gaya kedatangan candle (kompresi vs impulsif) & CVD",
+    "cisd": "status CISD & konfirmasi Open Interest / L-S Ratio",
+    "poi": "zona POI presisi, taktik entry (50% CE vs Trigger), & estimasi durasi hold"
   }},
   "decision": "APPROVED" | "CONDITIONAL" | "REJECTED",
-  "status": "ENTRY READY" | "WATCHLIST" | "REJECT",
-  "smc_score": 78,
-  "direction": "LONG" | "SHORT",
+  "status": "ENTRY READY" | "PRE-TAP LIMIT" | "REVERSAL WATCH" | "WATCHLIST" | "REJECT",
+  "execution_style": "ENTRY_NOW" | "LIMIT_PRE_TAP" | "WAIT_SWEEP_TRIGGER" | "LIMIT_RETEST" | "SKIP",
+  "smc_score": 80,
+  "direction": "{direction}",
   "entry_zone": "{entry_zone}",
   "sl": {sl},
   "tp1": {tp1},
   "tp2": {tp2},
   "rr": {rr:.2f},
-  "detailed_analysis": "ulasan institusional Top-Down (4H->1H->15M) + Orderflow mengapa diambil/ditunggu/ditolak",
-  "action_plan": "langkah eksekusi taktis (limit vs trigger, manajemen BEP saat TP1, batas waktu hold)"
+  "detailed_analysis": "ulasan padat SMC/ICT modern mengapa setup ini layak/ditunggu/ditolak sesuai karakter liar kripto",
+  "forward_playbook": "Langkah Utama (If-Then): apa yang sedang terjadi sekarang & tindakan spesifik yang harus dilakukan trader (level pasang limit / syarat trigger + aturan BEP di TP1)",
+  "flip_scenario": "Skenario Antisipasi / Flip: tanda apabila zona jebol impulsif (level close candle invalidasi) & cara berbalik arah memanfaatkan Breaker"
 }}"""
     return prompt
 
@@ -268,16 +288,14 @@ Balas HANYA dengan JSON valid murni (tanpa teks pengantar atau markdown):
 def parse_llm_json(text: str) -> dict:
     """
     Mengekstrak objek JSON secara tangguh dari respons LLM:
-    - Membuang blok reasoning <think>...</think> (termasuk model Qwen / DeepSeek)
+    - Membuang blok reasoning <think>...</think>
     - Membuang pembungkus markdown ```json ... ```
     - Mencari kurung kurawal seimbang terluar {...} & membersihkan trailing comma
     """
     if not text:
         raise ValueError("Respons LLM kosong")
 
-    # 1. Hapus blok <think>...</think>
     cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    # Jika <think> terpotong tanpa tag penutup sebelum '{', buang teks sebelum JSON
     if "<think>" in cleaned.lower():
         cleaned = re.sub(r"^.*?<think>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
 
@@ -287,7 +305,6 @@ def parse_llm_json(text: str) -> dict:
         cleaned = re.sub(r"\s*```$", "", cleaned)
         cleaned = cleaned.strip()
 
-    # 2. Coba parse langsung
     try:
         obj = json.loads(cleaned)
         if isinstance(obj, dict):
@@ -295,7 +312,6 @@ def parse_llm_json(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # 3. Ekstrak blok {...} seimbang pertama yang valid
     start = cleaned.find("{")
     if start == -1:
         raise ValueError("Tidak ditemukan kurung '{' JSON pada respons LLM")
@@ -325,7 +341,6 @@ def parse_llm_json(text: str) -> dict:
                     break
 
     candidate = cleaned[start : end + 1] if end != -1 else cleaned[start:]
-    # Perbaiki trailing comma umum dari LLM sebelum '}' atau ']'
     candidate_fixed = re.sub(r",\s*([}\]])", r"\1", candidate)
     obj = json.loads(candidate_fixed)
     if not isinstance(obj, dict):
@@ -344,7 +359,7 @@ def _pace_request() -> None:
 
 
 def call_groq_api(prompt: str, model: Optional[str] = None, api_key: Optional[str] = None) -> Optional[dict]:
-    """Mengirim permintaan ke Groq Cloud API dengan rate-pacing, exponential backoff, & multi-model fallback."""
+    """Mengirim permintaan ke Groq Cloud API dengan koneksi persisten cepat, pacing, & multi-model fallback."""
     key = api_key or get_groq_key()
     if not key:
         return None
@@ -364,6 +379,7 @@ def call_groq_api(prompt: str, model: Optional[str] = None, api_key: Optional[st
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
+    sess = _get_http_session()
 
     for mdl in models_to_try:
         payload = {
@@ -372,19 +388,19 @@ def call_groq_api(prompt: str, model: Optional[str] = None, api_key: Optional[st
                 {
                     "role": "system",
                     "content": (
-                        "Anda adalah Kepala Analis Top-Down MTF SMC Crypto Futures. "
-                        "Kembalikan HANYA objek JSON valid tanpa teks pengantar apa pun."
+                        "Anda adalah Kurator Utama Modern SMC/ICT Crypto Futures. "
+                        "Kembalikan HANYA objek JSON valid murni tanpa teks pengantar apa pun."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.1,
-            "max_tokens": 2300,
+            "max_tokens": 1800,
         }
         for attempt in range(3):
             _pace_request()
             try:
-                res = requests.post(GROQ_ENDPOINT, headers=headers, json=payload, timeout=28)
+                res = sess.post(GROQ_ENDPOINT, headers=headers, json=payload, timeout=24)
                 if res.status_code == 200:
                     data = res.json()
                     choices = data.get("choices", [])
@@ -395,25 +411,24 @@ def call_groq_api(prompt: str, model: Optional[str] = None, api_key: Optional[st
                         return parsed
                 elif res.status_code == 429:
                     retry_hdr = res.headers.get("Retry-After", "")
-                    wait_s = float(retry_hdr) if retry_hdr.replace(".", "", 1).isdigit() else (2.5 * (attempt + 1))
-                    time.sleep(min(wait_s, 15.0))
+                    wait_s = float(retry_hdr) if retry_hdr.replace(".", "", 1).isdigit() else (2.0 * (attempt + 1))
+                    time.sleep(min(wait_s, 12.0))
                     continue
                 elif res.status_code in (400, 404):
-                    # Model tidak tersedia / deprecated -> catat agar tidak diulang & pindah ke fallback
                     _UNAVAILABLE_MODELS.add(mdl)
                     break
                 else:
-                    time.sleep(1.5 * (attempt + 1))
+                    time.sleep(1.2 * (attempt + 1))
             except Exception as e:
                 if attempt == 2:
                     print(f"[AI Validator] Model {mdl} gagal pada percobaan terakhir: {e}", file=sys.stderr)
-                time.sleep(1.2 * (attempt + 1))
+                time.sleep(1.0 * (attempt + 1))
 
     return None
 
 
 def audit_smc_setup(setup: Any, btc_ctx: Optional[dict] = None, model: Optional[str] = None) -> dict:
-    """Mengaudit satu setup MTF SMC menggunakan Full LLM dengan fallback aman."""
+    """Mengaudit satu setup MTF SMC menggunakan Full LLM dengan disiplin status & fallback aman."""
     key = get_groq_key()
     if not key:
         return {"decision": "NO_API_KEY", "ok": False}
@@ -431,24 +446,59 @@ def audit_smc_setup(setup: Any, btc_ctx: Optional[dict] = None, model: Optional[
         except (ValueError, TypeError):
             score = int(round(getattr(setup, "python_score", 65)))
 
-        status = str(result.get("status", "")).upper()
-        if status not in ("ENTRY READY", "WATCHLIST", "REJECT"):
-            status = "ENTRY READY" if (score >= 70 and decision == "APPROVED") else ("WATCHLIST" if score >= 52 else "REJECT")
-
-        # Jika harga sebenarnya jauh dari POI (extended), tahan di WATCHLIST agar trader pasang Limit, bukan kejar market
         raw = getattr(setup, "raw_market_data", {}) or {}
-        if status == "ENTRY READY" and raw.get("at_poi") is False:
+        arch = getattr(setup, "archetype", "TREND_CONT")
+        app_code = raw.get("approach_code", "")
+        at_poi = bool(raw.get("at_poi", True))
+
+        status = str(result.get("status", "")).upper().strip()
+        if status not in VALID_STATUSES:
+            if decision == "REJECTED" or score < 50:
+                status = "REJECT"
+            elif arch == "PRE_REACTION" and score >= 65 and app_code != "IMPULSIF_LIAR":
+                status = "PRE-TAP LIMIT"
+            elif arch == "HTF_REVERSAL" and score >= 58:
+                status = "REVERSAL WATCH"
+            elif score >= 70 and decision == "APPROVED" and at_poi:
+                status = "ENTRY READY"
+            else:
+                status = "WATCHLIST"
+
+        # Disiplin lokasi & anti-pisau-jatuh pasca keputusan AI:
+        if status == "ENTRY READY" and not at_poi:
+            if arch == "PRE_REACTION" and app_code != "IMPULSIF_LIAR":
+                status = "PRE-TAP LIMIT"
+            elif arch == "HTF_REVERSAL":
+                status = "REVERSAL WATCH"
+            else:
+                status = "WATCHLIST"
+
+        if status == "PRE-TAP LIMIT" and app_code == "IMPULSIF_LIAR":
             status = "WATCHLIST"
+
+        exec_st = str(result.get("execution_style", "")).upper().strip()
+        if exec_st not in VALID_EXEC_STYLES:
+            exec_st = {
+                "ENTRY READY": "ENTRY_NOW",
+                "PRE-TAP LIMIT": "LIMIT_PRE_TAP",
+                "REVERSAL WATCH": "WAIT_SWEEP_TRIGGER",
+                "WATCHLIST": "WAIT_SWEEP_TRIGGER" if at_poi else "LIMIT_RETEST",
+                "REJECT": "SKIP",
+            }.get(status, getattr(setup, "exec_style", "WAIT_SWEEP_TRIGGER"))
 
         smc_elements = result.get("smc_elements", {})
         if not isinstance(smc_elements, dict):
             smc_elements = {}
+
+        fwd_play = str(result.get("forward_playbook", result.get("action_plan", ""))).strip()
+        flip_sc = str(result.get("flip_scenario", "")).strip()
 
         return {
             "ok": True,
             "decision": decision,
             "smc_score": score,
             "status": status,
+            "execution_style": exec_st,
             "direction": str(result.get("direction", "")).upper(),
             "entry_zone": str(result.get("entry_zone", "")).strip(),
             "sl": result.get("sl"),
@@ -457,7 +507,9 @@ def audit_smc_setup(setup: Any, btc_ctx: Optional[dict] = None, model: Optional[
             "rr": result.get("rr"),
             "smc_elements": smc_elements,
             "detailed_analysis": str(result.get("detailed_analysis", result.get("reason", ""))).strip(),
-            "action_plan": str(result.get("action_plan", "")).strip(),
+            "action_plan": fwd_play,
+            "forward_playbook": fwd_play,
+            "flip_scenario": flip_sc,
             "model": str(result.get("model", "")),
         }
 
@@ -471,7 +523,6 @@ def _apply_safe_ai_levels(s: Any, res: dict) -> None:
     menghitung ulang risk_pct, tp1_pct, tp2_pct, RR, durasi hold, dan invalidasi.
     """
     raw = getattr(s, "raw_market_data", {}) or {}
-    # Cegah AI membalik arah tanpa dasar level lengkap (jika berlawanan arah, pertahankan geometri Python)
     ai_dir = res.get("direction")
     if ai_dir in ("LONG", "SHORT") and ai_dir == s.direction:
         d = 1 if s.direction == "LONG" else -1
@@ -486,17 +537,14 @@ def _apply_safe_ai_levels(s: Any, res: dict) -> None:
         except (ValueError, TypeError):
             cand_sl, cand_tp1, cand_tp2 = s.sl, s.tp1, s.tp2
 
-        # Cek urutan arah level valid
         valid_order = (
             (d == 1 and cand_sl < entry_p < cand_tp1 <= cand_tp2)
             or (d == -1 and cand_sl > entry_p > cand_tp1 >= cand_tp2)
         )
         if valid_order:
-            orig_tp1, orig_tp2 = float(s.tp1), float(s.tp2)
-            # Pagar Zoom-Out Check: tolak SL AI jika lebih sempit dari 85% batas minimal 1H!
+            orig_tp2 = float(s.tp2)
             sl_dist = clamp(abs(entry_p - cand_sl), 0.85 * min_sl_d, 1.25 * max_sl_d)
             s.sl = (entry_p - sl_dist) if d == 1 else (entry_p + sl_dist)
-            # Pagar Anti-Typo TP2 AI: cegah salah ketik digit LLM (mis. 0.8755 -> 0.755) yang melampaui tembok 4H/durasi
             max_tp2_dist = max(abs(orig_tp2 - entry_p) * 1.35, 4.5 * sl_dist)
             if abs(cand_tp2 - entry_p) <= max_tp2_dist:
                 s.tp1 = cand_tp1
@@ -505,7 +553,6 @@ def _apply_safe_ai_levels(s: Any, res: dict) -> None:
     if res.get("entry_zone"):
         s.entry_zone = res["entry_zone"]
 
-    # Hitung ulang seluruh metrik turunan secara konsisten!
     risk = max(abs(s.entry - s.sl), 1e-12)
     s.risk_pct = risk / s.entry * 100.0
     s.tp1_pct = abs(s.tp1 - s.entry) / s.entry * 100.0
@@ -526,57 +573,119 @@ def _apply_safe_ai_levels(s: Any, res: dict) -> None:
     else:
         s.invalidation = f"Close 1H/15M menembus atas SL struktural {fp(s.sl)} (zona POI {s.entry_zone})."
 
-    # Penjaga kualitas R:R & status lokasi zona pasca-penyesuaian AI
     z_st = getattr(s, "zone_state", "")
+    arch = getattr(s, "archetype", "TREND_CONT")
     if s.rr < 1.55:
         s.status = "REJECT"
-    elif s.status == "ENTRY READY" and (s.rr < 1.96 or z_st in ("WAITING_PULLBACK", "IN_POI_TESTING")):
-        s.status = "WATCHLIST"
+        s.exec_style = "SKIP"
+    elif s.status == "ENTRY READY" and (
+        s.rr < 1.96 or z_st in ("POST_BOUNCE_WAIT", "WAITING_PULLBACK", "IN_POI_TESTING", "PRE_TAP_STALK")
+    ):
+        if arch == "PRE_REACTION" and s.rr >= 1.96 and raw.get("approach_code") != "IMPULSIF_LIAR":
+            s.status = "PRE-TAP LIMIT"
+            s.exec_style = "LIMIT_PRE_TAP"
+        elif arch == "HTF_REVERSAL":
+            s.status = "REVERSAL WATCH"
+            s.exec_style = "WAIT_SWEEP_TRIGGER"
+        else:
+            s.status = "WATCHLIST"
+
+
+def _select_balanced_ai_slate(candidates: List[Any], max_audit: int) -> List[Any]:
+    """
+    Memilih kandidat kurasi AI secara proporsional lintas variasi (TREND_CONT, PRE_REACTION, HTF_REVERSAL)
+    sehingga AI tidak hanya mengaudit satu tipe setup saja.
+    """
+    if len(candidates) <= max_audit:
+        return candidates
+
+    selected: List[Any] = []
+    seen_syms: set = set()
+
+    # 1. Pastikan seluruh ENTRY READY terambil lebih dulu
+    for r in candidates:
+        if getattr(r, "status", "") == "ENTRY READY" and len(selected) < max_audit:
+            selected.append(r)
+            seen_syms.add(r.symbol)
+
+    # 2. Pastikan perwakilan terbaik dari PRE_REACTION dan HTF_REVERSAL masuk kuota kurasi AI
+    for arch_target, quota in (("PRE_REACTION", max(2, max_audit // 3)), ("HTF_REVERSAL", max(2, max_audit // 4))):
+        cnt = 0
+        for r in candidates:
+            if len(selected) >= max_audit or cnt >= quota:
+                break
+            if r.symbol not in seen_syms and getattr(r, "archetype", "") == arch_target:
+                selected.append(r)
+                seen_syms.add(r.symbol)
+                cnt += 1
+
+    # 3. Isi sisa slot berdasarkan urutan prioritas global
+    for r in candidates:
+        if len(selected) >= max_audit:
+            break
+        if r.symbol not in seen_syms:
+            selected.append(r)
+            seen_syms.add(r.symbol)
+
+    return selected
 
 
 def audit_top_setups(
     results: List[Any],
     btc_ctx: Optional[dict] = None,
-    max_audit: int = 15,
-    workers: int = 3,
+    max_audit: int = 10,
+    workers: int = 4,
     equity: float = 0.0,
     risk_pct: float = 1.0,
     fee_pct: float = 0.05,
 ) -> None:
     """
-    Melakukan evaluasi Full LLM pada kandidat setup terbaik secara aman:
-    - Jika API Groq rate-limit / timeout / gagal parse, SKOR & STATUS PYTHON DIPERTAHANKAN UTUH
-      (tidak pernah lagi menimpa BTC/ETH/koin utama menjadi skor 0!).
-    - Menyinkronkan kembali position sizing setelah level divalidasi.
+    Melakukan kurasi Full LLM secara cepat & seimbang lintas 3 Archetype (Trend Cont, Pre-Reaction, Reversal):
+    - Jika API Groq rate-limit / timeout / gagal parse, SKOR & STATUS PYTHON DIPERTAHANKAN UTUH (Proteksi Skor 0).
+    - Memperbarui Forward Playbook & Flip Scenario dengan ulasan taktis AI.
     """
     if not results or not get_groq_key():
         return
 
     candidates = [
         r for r in results
-        if (getattr(r, "status", "") in ("ENTRY READY", "WATCHLIST") or getattr(r, "score", 0) >= 48)
+        if (getattr(r, "status", "") in ("ENTRY READY", "PRE-TAP LIMIT", "REVERSAL WATCH")
+            or str(getattr(r, "status", "")).startswith("WATCHLIST")
+            or getattr(r, "score", 0) >= 52)
         and getattr(r, "rr", 0.0) >= 1.55
     ]
+    st_prio = {
+        "ENTRY READY": 0,
+        "PRE-TAP LIMIT": 1,
+        "REVERSAL WATCH": 1,
+    }
     z_prio = {
+        "FIRST_TOUCH_NOW": 0,
         "SWEEP_IN_POI": 0,
         "IN_POI_REJECTING": 1,
+        "PRE_TAP_NEAR": 1,
         "IN_POI_TESTING": 2,
+        "PRE_TAP_STALK": 2,
         "LIQ_SWEPT": 3,
         "APPROACHING_POI": 4,
-        "WAITING_PULLBACK": 5,
+        "POST_BOUNCE_WAIT": 5,
+        "WAITING_PULLBACK": 6,
     }
     candidates.sort(
         key=lambda r: (
-            0 if getattr(r, "status", "") == "ENTRY READY" else 1,
+            st_prio.get(getattr(r, "status", ""), 2),
             z_prio.get(getattr(r, "zone_state", ""), 6),
             -getattr(r, "score", 0.0),
         )
     )
-    targets = candidates[:max_audit]
+    targets = _select_balanced_ai_slate(candidates, max_audit)
     if not targets:
         return
 
-    print(f"\n[AI Evaluator] Mengevaluasi {len(targets)} kandidat Top-Down MTF bersama Groq LLM ...", file=sys.stderr)
+    print(
+        f"\n[AI Kurator SMC/ICT] Mengkurasi paralel {len(targets)} kandidat lintas variasi bersama Groq LLM ...",
+        file=sys.stderr,
+    )
 
     with ThreadPoolExecutor(max_workers=min(max(1, workers), len(targets))) as pool:
         futures = {pool.submit(audit_smc_setup, s, btc_ctx): s for s in targets}
@@ -586,12 +695,11 @@ def audit_top_setups(
             try:
                 res = f.result()
                 if not res.get("ok"):
-                    # PROTEKSI SKOR 0: Pertahankan skor, status, dan level Top-Down Python!
                     s.ai_decision = "PYTHON_FALLBACK"
                     s.ai_confidence = float(s.score)
-                    s.ai_summary = "Evaluasi LLM dilewati sementara (rate-limit/timeout API); menggunakan skor & level Top-Down MTF Python."
+                    s.ai_summary = "Evaluasi LLM dilewati sementara (rate-limit/timeout API); mempertahankan evaluasi & playbook MTF Python."
                     print(
-                        f"  [Full LLM] {sym:12s} -> ⏭️ FALLBACK    | Skor MTF Python dipertahankan: {s.score:>4.0f} | Status: {s.status}",
+                        f"  [Groq SMC] {sym:12s} -> ⏭️ FALLBACK    | Skor Python dipertahankan: {s.score:>4.0f} | Status: {s.status}",
                         file=sys.stderr,
                     )
                     continue
@@ -599,10 +707,15 @@ def audit_top_setups(
                 s.smc_elements = res.get("smc_elements", {})
                 s.score = float(res["smc_score"])
                 s.status = res["status"]
+                s.exec_style = res["execution_style"]
                 s.ai_decision = res["decision"]
                 s.ai_confidence = float(res["smc_score"])
                 s.ai_summary = res["detailed_analysis"]
                 s.ai_action_note = res["action_plan"]
+                if res.get("forward_playbook"):
+                    s.forward_playbook = res["forward_playbook"]
+                if res.get("flip_scenario"):
+                    s.flip_scenario = res["flip_scenario"]
                 s.ai_model = res["model"]
 
                 _apply_safe_ai_levels(s, res)
@@ -611,9 +724,10 @@ def audit_top_setups(
 
                 dec = s.ai_decision
                 icon = "✅" if dec == "APPROVED" else ("⚠️" if dec == "CONDITIONAL" else "❌")
+                arch_short = getattr(s, "archetype", "SMC")[:10]
                 print(
-                    f"  [Full LLM] {sym:12s} -> {icon} {dec:<11s} | Skor: {s.score:>3.0f} | RR 1:{s.rr:.1f} | Status: {s.status}",
+                    f"  [Groq SMC] {sym:12s} [{arch_short:<10s}] -> {icon} {dec:<11s} | Skor: {s.score:>3.0f} | RR 1:{s.rr:.1f} | {s.status}",
                     file=sys.stderr,
                 )
             except Exception as e:
-                print(f"  [Full LLM] {sym:12s} -> ⏭️ Error ({e}); skor Python {s.score:.0f} dipertahankan.", file=sys.stderr)
+                print(f"  [Groq SMC] {sym:12s} -> ⏭️ Error ({e}); skor Python {s.score:.0f} dipertahankan.", file=sys.stderr)

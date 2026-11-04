@@ -30,8 +30,29 @@ def _parse_klines_df(raw: list, server_ms: int) -> pd.DataFrame:
         df[col] = df[col].astype(float)
     df["open_time"] = df["open_time"].astype("int64")
     df["close_time"] = df["close_time"].astype("int64")
-    df = df[df["close_time"] < server_ms].reset_index(drop=True)  # buang candle yang belum close
-    return df
+
+    # Simpan candle berjalan (live forming candle) di attrs untuk deteksi sentuhan detik pertama & harga real-time,
+    # sementara seluruh baris DataFrame tetap 100% candle yang sudah close agar struktur/EMA bebas repaint!
+    live_bar = None
+    unclosed = df[df["close_time"] >= server_ms]
+    if not unclosed.empty:
+        lr = unclosed.iloc[-1]
+        live_bar = {
+            "open_time": int(lr["open_time"]),
+            "close_time": int(lr["close_time"]),
+            "open": float(lr["open"]),
+            "high": float(lr["high"]),
+            "low": float(lr["low"]),
+            "close": float(lr["close"]),
+            "volume": float(lr["volume"]),
+            "quote_volume": float(lr["quote_volume"]),
+            "tb_quote": float(lr["tb_quote"]),
+        }
+
+    closed_df = df[df["close_time"] < server_ms].reset_index(drop=True)
+    if live_bar is not None:
+        closed_df.attrs["live_bar"] = live_bar
+    return closed_df
 
 
 def _filter_universe(

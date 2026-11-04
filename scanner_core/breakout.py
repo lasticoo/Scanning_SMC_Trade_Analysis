@@ -26,7 +26,7 @@ from .indicators import (
     trend_text,
 )
 from .models import MAJOR_SYMBOLS, NAN, Config, Pat, Setup, clamp, fp, ts_utc
-from .mtf_smc import extract_tf_structure
+from .mtf_smc import extract_tf_structure, populate_forward_playbook
 from .zone_radar import enrich_setup_with_zone_radar
 
 SCORE_NAMES = [
@@ -462,9 +462,13 @@ def analyze_symbol(
             final_setup = evaluate(d, "DEVELOPING", t, last_pat)
 
     if final_setup is not None:
+        final_setup.archetype = "BREAKOUT"
+        final_setup.archetype_label = "Breakout Konsolidasi"
+        final_setup.exec_style = "ENTRY_NOW" if final_setup.status == "ENTRY READY" else "WAIT_SWEEP_TRIGGER"
         map4 = extract_tf_structure(df4, cfg.htf_piv, "4H", lookback_bars=80) if df4 is not None else None
         map1 = extract_tf_structure(df1, cfg.htf_piv, "1H", lookback_bars=96) if df1 is not None else None
         map15 = extract_tf_structure(df15, cfg.piv_len, "15M", lookback_bars=95)
         enrich_setup_with_zone_radar(final_setup, df15, map4, map1, map15, sess_ctx, cvd_ctx, cfg)
+        populate_forward_playbook(final_setup)
     return final_setup
 
