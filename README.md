@@ -1,164 +1,109 @@
-# Binance Futures SMC (Smart Money Concepts) & Breakout Setup Scanner
+# Binance Futures Top-Down MTF SMC (`4H` → `1H` → `15M`), Orderflow, & Breakout Scanner v2.0
 
-Scanner otomatis berbasis Python untuk mendeteksi setup trading berprobabilitas tinggi pada pasar **Binance USDⓈ-M Perpetual Futures** menggunakan analisis **Smart Money Concepts (SMC)** dan **Pola Konsolidasi Breakout**.
+Scanner kuantitatif & institusional berbasis Python untuk mendeteksi setup trading berprobabilitas tinggi pada pasar **Binance USDⓈ-M Perpetual Futures** dengan pendekatan **Top-Down Multi-Timeframe Refinement (`4H` → `1H` → `15M`)**, **Orderflow Publik**, **Consolidation Breakout**, serta evaluasi **Full LLM (Groq)**.
 
-Hanya menggunakan **Public Endpoint Binance** (tanpa API key, tanpa order otomatis, dan aman).
+Hanya menggunakan **Public Endpoint & WebSocket Binance** (tanpa API key Binance, tanpa akses akun, dan aman).
+
+---
+# 1. Scan standar Top-Down MTF (4H -> 1H -> 15M) + Radar Zona Live + Orderflow + Evaluasi Groq AI
+python binance.py
+
+# 2. Tampilkan HANYA koin yang harganya SUDAH di/dekat Demand/Supply/POI OB-FVG atau baru Liquidity Sweep
+python binance.py --in-zone
+
+# 3. Mode kilat (~4 detik) Radar Lokasi Harga Live (Demand/Supply/OB/FVG/Sweep tanpa tunggu antrean AI)
+python binance.py --radar
+
+# 4. Scan super cepat murni mesin Top-Down MTF Python (~4-5 detik untuk 40 koin)
+python binance.py --no-ai --top 40
+
+# 5. Scan lalu pantau live sentuhan zona Limit POI, 50% CE, & Liquidity Sweep via WebSocket
+python binance.py --watch-ws
+
+# 6. Mode otomatis tiap penutupan 15M + WebSocket POI Watcher + Notifikasi Telegram
+python binance.py --loop --watch-ws --telegram
+
+# 7. Evaluasi akurasi seluruh histori sinyal di folder scan_output/
+python binance.py --track --include-watchlist
+
+# 8. Backtest Walk-Forward 14 hari terakhir (bebas look-ahead)
+python binance.py --backtest --days 14 --bt-top 10
+
+## 🚀 Apa yang Baru di Upgrade v2.0?
+
+### 1. Metode Top-Down Multi-Timeframe Refinement (`4H` → `1H` → `15M`)
+Mengotomatiskan alur kerja analis institusional tanpa menambah beban kuota API:
+- **Lapis `4H` (Kompas Makro & 1–3 Tembok Besar)**:
+  Memetakan *Macro Dealing Range* serta **Tembok Supply `4H`** (atas) dan **Tembok Demand `4H`** (bawah) agar sinyal tidak menabrak tembok besar berlawanan dan target `TP2` tidak tersangkut berhari-hari.
+- **Lapis `1H` (*Working Trading Range* & Estimasi Durasi Posisi)**:
+  Mengunci rentang kerja aktif (`1H Swing Low` ↔ `1H Swing High`), *Unmitigated Order Block*, *Breaker Block*, *Unmitigated FVG*, serta kolam likuiditas **`EQH` / `EQL`**. Menghitung **Estimasi Durasi Posisi (`Hold Time`)** berbasis kecepatan `ATR 1H` agar modal tidak tergerus *funding fee* 8 jam akibat target terlalu jauh.
+- **Lapis `15M` (Likuiditas Kecil + Filter Proporsionalitas *"Zoom-Out Check"*)**:
+  Mencari *Nested POI* (`1H` + `15M`), *BSL/SSL/Asian Range Sweep*, `CHOCH`, `BOS`, `IDM Taken`, `CISD`, dan `Pin Bar`. Jarak *Stop Loss* dikunci secara matematis terhadap **`ATR 1H` (`0.75x – 2.20x ATR 1H`)** dan proporsi *Working Range* `1H`—menghilangkan SL "sehelai rambut" (`0.05%–0.4%`) yang mudah tersapu *wick*, sekaligus menjaga agar SL tidak membengkak seperti SL `4H` murni.
+
+### 2. Data Orderflow & Derivatif Futures Publik (Tanpa API Key)
+- **CVD (*Cumulative Volume Delta*) & Absorption**: Dihitung langsung dari volume *Taker Buy* (`tb_quote`) vs *Taker Sell* klines publik untuk mendeteksi *Bullish / Bearish CVD Absorption* di area POI.
+- **Open Interest (`OI`) & Long/Short Ratio**: Mengambil perubahan `OI` (`1H` & `4H`), *Top Trader L/S Ratio*, dan *Global Retail L/S Ratio* untuk membedakan masuknya uang institusional baru vs *squeeze* / jebakan ritel.
+- **Killzone & Likuiditas Sesi Asia**: Mendeteksi sesi aktif (*Asian*, *London Killzone*, *NY Open Killzone*) dan penyapuan *Asian High / Asian Low*.
+
+### 3. Evaluator AI Top-Down Tangguh (`ai_validator.py`)
+- **Data 3 Timeframe Utuh & Presisi Harga Adaptif**: Seluruh koordinat `4H`, `1H`, `15M`, dan *Orderflow* dikirim lengkap tanpa pembulatan kaku `:.4f` (aman untuk altcoin harga mikro seperti `1000PEPEUSDT` maupun `BTCUSDT`).
+- **Tahan Tag `<think>` & Proteksi Skor `0`**: Dilengkapi ekstraktor JSON seimbang (mendukung model *reasoning* seperti Qwen/DeepSeek), *rate-pacing* + *exponential backoff* otomatis, serta **Proteksi Skor `0`**—jika API Groq sedang terkena *rate-limit* atau *timeout*, skor dan level Top-Down MTF Python dipertahankan utuh (tidak pernah lagi menjatuhkan koin bagus menjadi `score 0`).
+- **Validasi Pasca-AI**: Setiap level `SL`/`TP` dari AI divalidasi ulang terhadap pagar *Zoom-Out Check* `1H`, lalu `risk_pct`, `RR`, durasi *hold*, dan *position sizing* (`qty`) disinkronkan ulang otomatis.
+
+### 4. Arsitektur Modular, Kecepatan `AsyncIO`, WebSocket Live Alert, Tracker, & Backtester
+- **Struktur Modular (`scanner_core/`)**: Terpisah rapi menjadi `models.py`, `indicators.py`, `exchange_async.py`, `mtf_smc.py`, `zone_radar.py`, `breakout.py`, `tracker.py`, dan `ws_watcher.py`.
+- **Detektor Lokasi Harga Live & Liquidity Sweep Terpadu (`zone_radar.py`)**:
+  - Mendeteksi secara presisi apakah harga **detik ini sudah di dalam** Demand/Supply `4H`/`1H`, *Fresh Order Block*, *Breaker Block*, atau *Unmitigated FVG* beserta persentase kedalaman mitigasi zona (*Zone Depth %* & *50% Mean Threshold / CE*).
+  - Mendeteksi *Liquidity Sweep* lintas `1H` & `15M` (`BSL`/`SSL` Swing Sweep, `EQH`/`EQL` Stop-Hunt, `IDM Taken`, dan *Asian High/Low Sweep*), lengkap dengan deteksi reaksi candle (*REJECTING* vs *TESTING / Falling Knife*).
+  - Otomatis mengurutkan kandidat `WATCHLIST` agar koin yang **sedang di zona / baru saja *sweep*** muncul paling atas, dilengkapi tabel khusus **Radar Lokasi Harga Live** serta filter `--in-zone` & `--radar`.
+- **High-Speed Async Scanner (`aiohttp`)**: Memindai puluhan hingga ratusan kontrak beserta data derivatif hanya dalam hitungan detik.
+- **Real-Time WebSocket POI & Sweep Watcher (`--watch-ws`)**: Memantau harga *live* via stream `@bookTicker` sub-detik (0 beban REST API) dan memberi peringatan `⚡ APPROACHING POI`, `🎯 POI TAPPED`, `💎 50% CE POI`, `💧 LIVE LIQUIDITY SWEEP`, `💰 TP1`, `🏆 TP2`, hingga `🛑 SL`.
+- **Signal Performance Tracker (`--track`) & Walk-Forward Backtester (`--backtest`)**: Mengukur *Win Rate*, *Profit Factor*, *Expectancy (R)*, *Max Drawdown*, dan rata-rata durasi *hold* baik dari histori CSV nyata maupun simulasi historis *walk-forward* bebas *look-ahead bias*.
 
 ---
 
-## 🎯 Fitur Smart Money Concepts (SMC)
+## 🛠️ Instalasi & Penggunaan
 
-Skrip mendeteksi seluruh elemen kunci SMC secara otomatis:
-
-1. **Order Block (OB) Bullish & Bearish**:
-   - Mendeteksi candle institusional sebelum pergerakan impulsif yang meninggalkan FVG / menembus struktur.
-   - Mengelompokkan status OB: *Unmitigated*, *Mitigated (Tapped)*, dan *Sweep POI*.
-2. **Liquidity Sweep & Liquidity Run**:
-   - **BSL Sweep**: Sumbu harga menyapu *Buy-Side Liquidity* (Swing High) tetapi candle *close* kembali ke bawah.
-   - **SSL Sweep**: Sumbu harga menyapu *Sell-Side Liquidity* (Swing Low) tetapi candle *close* kembali ke atas.
-   - **Liquidity Run**: Penembusan agresif dengan ekspansi momentum tinggi.
-3. **Liquidity Range & Dealing Range**:
-   - Menghitung Swing High & Swing Low lokal.
-   - Menentukan zona **Discount** (< 50% Equilibrium) untuk mencari peluang BUY murah, dan zona **Premium** (> 50% Equilibrium) untuk mencari peluang SELL mahal.
-4. **CHOCH (Change of Character)**:
-   - Sinyal awal pembalikan arah tren institusional saat harga menembus swing struktural utama berlawanan arah.
-5. **BOS (Break of Structure)**:
-   - Konfirmasi kelanjutan tren saat harga menembus swing struktural searah tren.
-6. **Inducement (IDM)**:
-   - Mendeteksi internal swing pertama (*trap level*) dan mengonfirmasi apakah likuiditas IDM telah disapu (*IDM taken*) sebelum menyentuh POI utama.
-7. **Supply & Demand (S&D) Zones**:
-   - Memetakan zona Demand kuat di area Discount dan zona Supply kuat di area Premium.
-8. **Candle Pin Bar (Rejection Wick)**:
-   - Mendeteksi candle penolakan sumbu panjang (sumbu >= 50% dari total rentang candle) di area POI.
-9. **CISD (Change in State of Delivery)**:
-   - Konsep ICT/SMC modern: Mendeteksi peralihan algoritma pengiriman harga saat harga menutup melampaui harga pembukaan rangkaian candle berlawanan.
-10. **POI (Point of Interest) & Sweep OB**:
-    - Memberikan bobot tertinggi pada Order Block yang terbentuk setelah menyerap likuiditas candle/swing sebelumnya (*High Probability POI*).
-11. **Setup SMC Eksekusi (Sniper Entry, OB Retest, FVG Tap)**:
-    - **SMC Sniper Entry**: Kombinasi *Liquidity Sweep + CHOCH + Retest POI* di area Discount/Premium.
-    - **SMC Demand Bounce (OB Retest)**: Reaksi pemantulan pada Bullish Order Block.
-    - **SMC Supply Rejection (OB Retest)**: Reaksi penolakan pada Bearish Order Block.
-    - **SMC FVG Retest Entry**: Pengisian celah *Fair Value Gap* (Imbalance).
-    - **SMC SSL/BSL Liquidity Sweep Reversal**: Reaksi tajam setelah pembersihan kolam likuiditas eksternal.
-
----
-
-## 🚀 Cara Menjalankan
-
-### 1. Instalasi Kebutuhan
+### 1. Instalasi Dependensi
 ```powershell
 pip install -r requirements.txt
 ```
 
-### 2. Pilihan Strategi
-
-#### A. Mode SMC (Default)
-Memindai setup SMC pada koin-koin likuid teratas:
+### 2. Pemindaian Live (Top-Down MTF SMC / Breakout)
 ```powershell
+# Scan cepat Async Top-Down MTF SMC + Orderflow + Evaluasi AI Groq (Default)
 python binance.py
-# atau secara eksplisit:
-python binance.py --strategy smc
-```
 
-#### B. Mode Breakout Konsolidasi (Pola Klasik)
-Memindai pola konsolidasi: *Triangle, Wedge, Flag*:
-```powershell
-python binance.py --strategy breakout
-```
+# Scan murni mesin kuantitatif Top-Down MTF Python (tanpa AI)
+python binance.py --no-ai
 
-#### C. Mode Gabungan (All)
-Memindai kedua strategi sekaligus dan memilih setup dengan skor tertinggi untuk tiap aset:
-```powershell
+# Scan simbol tertentu + hitung ukuran posisi otomatis (modal 1000 USDT, risiko 1%)
+python binance.py --symbols BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,AVAXUSDT --equity 1000 --risk-pct 1
+
+# Scan strategi gabungan (SMC + Breakout Konsolidasi)
 python binance.py --strategy all
 ```
 
----
+### 3. Pantauan Harga Real-Time via WebSocket (`--watch-ws`)
+```powershell
+# Scan satu kali lalu langsung pantau live sentuhan zona POI, TP1, TP2, & SL
+python binance.py --watch-ws
 
-## ⚡ Contoh Penggunaan Praktis
+# Jalan otomatis tiap 15 menit + pantauan WebSocket real-time di sela candle + kirim Telegram
+python binance.py --loop --watch-ws --telegram
+```
 
-- **Scan Cepat pada Koin Tertentu**:
-  ```powershell
-  python binance.py --symbols BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT
-  ```
+### 4. Evaluasi Performa Sinyal (`--track`) & Backtester Historis (`--backtest`)
+```powershell
+# Evaluasi performa nyata seluruh histori sinyal di folder scan_output/*.csv
+python binance.py --track
 
-- **Scan dengan Manajemen Risiko & Ukuran Posisi Otomatis**:
-  ```powershell
-  python binance.py --equity 1000 --risk-pct 1
-  ```
-  *(Menghitung lot/qty posisi berdasarkan modal $1.000 dengan risiko maksimal 1% = $10 per trade)*
+# Sertakan juga skenario Limit Order dari sinyal WATCHLIST pada tracker
+python binance.py --track --include-watchlist
 
-- **Scan dengan Filter Likuiditas Khusus**:
-  ```powershell
-  python binance.py --top 50 --min-vol 100
-  ```
-  *(50 pair teratas dengan volume 24 jam minimal $100 juta USDT)*
+# Jalankan Walk-Forward Backtest (bebas look-ahead bias) selama 14 hari terakhir
+python binance.py --backtest --days 14 --bt-top 10
 
-- **Mode Otomatis (Looping Tiap 15 Menit)**:
-  ```powershell
-  python binance.py --loop
-  ```
-
-- **Notifikasi Telegram**:
-  ```powershell
-  $env:TELEGRAM_BOT_TOKEN="token_bot_anda"
-  $env:TELEGRAM_CHAT_ID="id_chat_anda"
-  python binance.py --loop --telegram
-  ```
-
-- **Evaluasi Full LLM SMC (Aktif Otomatis)**:
-  ```powershell
-  python binance.py
-  ```
-  *(Full LLM Groq bertindak sebagai Penilai Tunggal / Head Trader yang menentukan skor 0-100, status ENTRY READY/WATCHLIST/REJECT, dan 4 pilar SMC institusional).*
-
-- **Opsi Konfigurasi AI**:
-  ```powershell
-  python binance.py --ai-top 20                       # evaluasi 20 kandidat setup teratas
-  python binance.py --ai-model openai/gpt-oss-120b    # gunakan model alternatif Groq
-  python binance.py --no-ai                           # jalankan rumus mekanis Python klasik jika tanpa AI
-  ```
-
----
-
-## 🧠 Evaluator Penuh Full LLM (Head SMC Trader)
-
-Scanner kini beroperasi dengan arsitektur **Full LLM Authority**:
-1. **Analisis Koin Independen (Tanpa Keterikatan Kaku pada BTC)**:
-   - Banyak altcoin memiliki rotasi likuiditas, ekosistem, dan momentum mandiri.
-   - AI mengevaluasi setiap koin 100% murni berdasarkan Price Action dan struktur SMC koin itu sendiri tanpa mendiskualifikasi setup hanya karena BTC sedang berbeda arah.
-2. **Pemetaan Mandiri 10 Elemen Kunci SMC (Ditentukan AI dari Data Binance Real-Time)**:
-   - **Order Blocks (Bullish & Bearish)**: Mengidentifikasi OB aktif yang belum termitigasi.
-   - **Liquidity Sweeps & Runs**: Mendeteksi penyapuan likuiditas BSL/SSL dan ekspansi agresif.
-   - **Liquidity Range**: Memetakan Swing High, Swing Low, Equilibrium, dan zona Diskon vs Premium.
-   - **CHOCH (Change of Character)**: Mengonfirmasi peralihan awal karakter pasar.
-   - **Inducement (IDM)**: Mendeteksi level jebakan likuiditas retail dan status pembersihannya (*IDM Taken*).
-   - **Supply & Demand Zones**: Memetakan area penawaran dan permintaan institusional.
-   - **BOS (Break of Structure)**: Mengonfirmasi kelanjutan tren searah struktur.
-   - **Pin Bar Rejection**: Mengukur sumbu penolakan panjang (rejection wick >= 50%) di zona penting.
-   - **CISD (Change in State of Delivery)**: Mendeteksi peralihan algoritma pengiriman harga.
-   - **High-Probability POI**: Point of Interest utama berupa Order Block yang terbentuk setelah sweep likuiditas.
-3. **Keputusan Eksekusi Mandiri (Masuk atau Tidak)**:
-   - AI menentukan status: `ENTRY READY` (siap dieksekusi), `WATCHLIST` (menunggu konfirmasi), atau `REJECT`.
-   - Menghitung level presisi: Entry Zone, Stop Loss (SL), TP1, TP2, dan Rasio Risk:Reward (RR).
-   - Menyertakan rencana aksi langkah demi langkah (*tactical action plan*).
-
-
----
-
-## 📊 Format Laporan & Skor (0 - 100)
-
-Sistem penilaian SMC membagi skor ke dalam 6 komponen objektif:
-1. **Konteks HTF & Tren (Maks 20)**: Keselarasan tren 4H dan 1H.
-2. **Kualitas POI & Zone (Maks 25)**: Validitas Order Block, FVG, dan posisi Dealing Range (Discount/Premium).
-3. **Struktur & Liquidity (Maks 25)**: Adanya Liquidity Sweep, CHOCH, BOS, dan Inducement taken.
-4. **Trigger & Rejection (Maks 15)**: Pin Bar rejection, CISD, dan volume konfirmasi.
-5. **Risk to Reward (Maks 10)**: RR minimal 1:2.0, hingga 1:3.0+ ke target likuiditas lawan.
-6. **Likuiditas Pasar (Maks 5)**: Volume pasar 24 jam dan toleransi spread.
-
-**Status Setup**:
-- `ENTRY READY`: Skor >= 70 dan RR >= 2.0 (setup matang dengan konfirmasi).
-- `WATCHLIST`: Skor >= 50 (harga mendekati/menyentuh POI, menunggu trigger).
-- `REJECT`: Skor < 50 atau RR di bawah 2.0.
-
-Laporan otomatis dicetak di terminal dan disimpan di folder `scan_output/` dalam format `.txt` dan `.csv`.
-
+# Backtest khusus pada koin pilihan Anda
+python binance.py --backtest --days 21 --symbols BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,AVAXUSDT
+```

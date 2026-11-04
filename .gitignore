@@ -1,6 +1,8 @@
 .env
 .env
 __pycache__/ai_validator.cpython-310.pyc
+scautputn_o
+scan_output
 scan_output/scan_20261022_0756.txt
 scan_output/scan_20261022_0758.csv
 scan_output/scan_20261022_0758.txt
