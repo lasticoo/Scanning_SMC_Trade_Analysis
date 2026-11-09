@@ -34,8 +34,11 @@ from scanner_core.models import clamp, fp, size_position
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 _RATE_LOCK = threading.Lock()
 _LAST_CALL_TS = 0.0
-_MIN_CALL_INTERVAL = 0.25  # pacing ringan agar paralel 4 worker cepat tanpa memicu burst 429
+_MIN_CALL_INTERVAL = 0.30  # pacing halus lintas worker agar tidak memicu burst 429
 _UNAVAILABLE_MODELS: set = set()
+_MODEL_COOLDOWN_UNTIL: Dict[str, float] = {}
+_MODEL_REMAINING_TPM: Dict[str, int] = {}
+_MODEL_INFLIGHT: Dict[str, int] = {}
 _TLS_LOCAL = threading.local()
 
 VALID_STATUSES = ("ENTRY READY", "PRE-TAP LIMIT", "REVERSAL WATCH", "WATCHLIST", "REJECT")
@@ -91,6 +94,10 @@ def get_default_model() -> str:
 
 def get_fallback_model() -> str:
     return os.environ.get("GROQ_FALLBACK_MODEL", "openai/gpt-oss-120b").strip()
+
+
+def get_safety_model() -> str:
+    return os.environ.get("GROQ_SAFETY_MODEL", "openai/gpt-oss-20b").strip()
 
 
 def _fmt_zones(zones: list, limit: int = 3) -> str:
@@ -211,62 +218,43 @@ def build_full_llm_smc_prompt(setup: Any, btc_ctx: Optional[dict] = None) -> str
         b4_str = "Bullish" if b4 == 1 else ("Bearish" if b4 == -1 else "Netral")
         btc_note = f"BTC 4H: {b4_str} (Referensi makro saja; altcoin dinilai 100% independen dari struktur koin sendiri)"
 
-    prompt = f"""Anda adalah Kurator Utama SMC/ICT Modern Crypto Futures (4H -> 1H -> 15M) & Orderflow.
-Tugas Anda adalah menilai apakah setup ini MENARIK secara SMC/ICT modern dengan menyesuaikan karakter pasar crypto yang liar (stop-hunt wick / Judas Swing), menjaga jarak tidak terlalu jauh & durasi trade singkat (Intraday / Short-Swing <= 36 jam), serta memberi langkah taktis ke depan yang jelas.
+    prompt = f"""Kurator SMC/ICT Modern Crypto Futures (4H->1H->15M & Orderflow). Evaluasi setup sesuai karakter liar kripto (stop-hunt/Judas Swing), jaga jarak dekat & durasi <=36j, beri langkah taktis jelas.
 
-[VARIASI & KARAKTER SETUP KANDIDAT: {symbol}]
-- Harga Live: {fp(cur_p)} | Sesi: {sess_txt} | Konteks BTC: {btc_note}
-- Variasi Archetype: {archetype} ({arch_lbl}) | Arah: {direction} — {pattern}
-- Usulan Taktik Awal: {exec_style} | Gaya Kedatangan Harga ke Zona: {app_style} | Estimasi Waktu Sentuh POI: {tap_txt}
+[SETUP {symbol}] Harga: {fp(cur_p)} | Sesi: {sess_txt} | {btc_note}
+- Archetype: {archetype} ({arch_lbl}) | {direction} ({pattern}) | Taktik Awal: {exec_style} | Approach: {app_style} | Est. Sentuh: {tap_txt}
+- Lokasi Live: {z_badge} ({z_state} | Jarak POI: {dist_poi:.2f}% | Depth: {depth_txt}) | Zona Aktif: {active_zones_txt}
+- Sweep: {sweep_live_txt} | Magnet EQH/EQL/IDM: {magnet_txt} | Reaksi/CVD: {reac_live_txt}
 
-[RADAR LOKASI HARGA LIVE DI DEMAND / SUPPLY / POI / LIQUIDITY SWEEP]
-- Status Lokasi Live: {z_badge} (State: {z_state} | Jarak ke Bibir POI: {dist_poi:.2f}% | Kedalaman Mitigasi: {depth_txt})
-- Zona Demand/Supply/OB/FVG Aktif/Mendekat: {active_zones_txt}
-- Liquidity Sweep Terkini: {sweep_live_txt} | Magnet Kolam Likuiditas di Depan (EQH/EQL/IDM): {magnet_txt}
-- Reaksi / Dinamika Candle & CVD: {reac_live_txt}
+[4H MAKRO] Tren: {t4} | ATR4H: {fp(atr_4h)} | Range4H: {r4_str} | Tembok4H: {w4_str} | OB4H: {obs_4h_txt}
+[1H RANGE] Tren: {s1} | ATR1H: {fp(atr_1h)} | Range1H: {fp(r1_lo)}-{fp(r1_hi)} (EQ {fp(r1_eq)}, Posisi {z_pos_lbl}) | Hold: {hold_lbl}
+- OB1H: {obs_1h_txt} | FVG1H: {fvgs_1h_txt} | EQH1H[{eqh_1h}] EQL1H[{eql_1h}]
+[15M & ORDERFLOW] ATR15M: {fp(atr_15m)} | Struktur15M: {recent_events} | IDM: {idm_txt} | PinBar: {pin_txt}
+- OB15M: {obs_15_txt} | FVG15M: {fvgs_15_txt} | EQH15M[{eqh_15}] EQL15M[{eql_15}]
+- Orderflow: {of_txt} | Funding: {fund_pct:+.4f}%
 
-[LAPIS 1 — 4H MACRO KEY RANGES & TEMBOK BESAR]
-- Tren & Struktur 4H: {t4} | ATR 4H: {fp(atr_4h)} | Dealing Range 4H: {r4_str}
-- Peta Tembok 4H: {w4_str} | OB/Breaker 4H Aktif: {obs_4h_txt}
+[LEVEL & ZOOM-OUT 1H] Entry: {fp(plan_entry)} (POI: {entry_zone} | {'Di POI' if at_poi else 'Menunggu Sentuhan'})
+- SL: {fp(sl)} | TP1: {fp(tp1)} | TP2: {fp(tp2)} (RR 1:{rr:.1f}) | Tembok Lawan: {opp_txt} | Invalidasi: {invalidation}
+- WAJIB: Jarak |Entry-SL| harus di antara {fp(min_sl_d)} s.d. {fp(max_sl_d)}, TP2 tidak menembus tembok 4H lawan.
 
-[LAPIS 2 — 1H WORKING TRADING RANGE & DURASI POSISI]
-- Tren & Struktur 1H: {s1} | ATR 1H: {fp(atr_1h)}
-- Working Range 1H: Low {fp(r1_lo)} <-> High {fp(r1_hi)} | EQ 1H: {fp(r1_eq)} | Posisi: {z_pos_lbl}
-- OB/Breaker 1H: {obs_1h_txt} | FVG 1H: {fvgs_1h_txt} | EQH 1H [{eqh_1h}] | EQL 1H [{eql_1h}]
-- Estimasi Lama Posisi ke TP: {hold_lbl}
+[ATURAN STATUS]
+1. "ENTRY READY" ("ENTRY_NOW"): Harga SUDAH di/dekat POI + ada konfirmasi sweep/reaksi/CHOCH/CISD valid, RR>=2.0.
+2. "PRE-TAP LIMIT" ("LIMIT_PRE_TAP"): Setup PRE_REACTION mendekati POI segar (0 touch, <=2.6%) dgn pendekatan KOMPRESI/WAJAR -> siap Limit sebelum bereaksi (jika terjun marubozu liar -> ubah ke "WATCHLIST" + "WAIT_SWEEP_TRIGGER").
+3. "REVERSAL WATCH" ("WAIT_SWEEP_TRIGGER"): Setup HTF_REVERSAL di Tembok 4H/1H ekstrem -> dilarang limit buta, wajib tunggu Sweep + 15M CHOCH/CISD.
+4. "WATCHLIST": Sudah memantul jauh (tunggu Limit Retest) atau belum ada konfirmasi close. "REJECT": Zona lemah/RR<1.8.
 
-[LAPIS 3 — 15M REFINEMENT, LIKUIDITAS KECIL, & ORDERFLOW]
-- ATR 15M: {fp(atr_15m)} | Event Struktur 15M: {recent_events}
-- OB/Breaker 15M: {obs_15_txt} | FVG 15M: {fvgs_15_txt} | EQH 15M [{eqh_15}] | EQL 15M [{eql_15}]
-- Inducement (IDM): {idm_txt} | Rejection Candle: {pin_txt}
-- Orderflow & Derivatif: {of_txt} | Funding Rate: {fund_pct:+.4f}%
-
-[RENCANA LEVEL TOP-DOWN & ATURAN WAJIB "ZOOM-OUT CHECK" (PROPORSIONAL 1H)]
-- Acuan Entry: {fp(plan_entry)} (Zona POI Ideal: {entry_zone} | {'Sudah di POI' if at_poi else 'Belum di POI / Menunggu Sentuhan'})
-- Stop Loss Proporsional 1H: {fp(sl)} | TP1: {fp(tp1)} | TP2: {fp(tp2)} (R:R 1:{rr:.1f}) | Target Tembok Lawan: {opp_txt}
-- Invalidasi: {invalidation}
-- ATURAN WAJIB: Jarak SL dari Entry WAJIB di antara {fp(min_sl_d)} s.d. {fp(max_sl_d)} (tahan stop-hunt wick kripto), dan TP2 dilarang menembus tembok 4H lawan.
-
-[PANDUAN KURASI SMC/ICT MODERN KHUSUS CRYPTO]
-1. "ENTRY READY" (execution_style="ENTRY_NOW"): HANYA jika harga SUDAH di/sangat dekat POI DAN sudah ada bukti reaksi/sweep/shift struktur valid, R:R >= 2.0, durasi cepat.
-2. "PRE-TAP LIMIT" (execution_style="LIMIT_PRE_TAP"): Khusus setup PRE_REACTION yang mendekati Fresh Supply/Demand/OB/Breaker (unmitigated, jarak dekat <= 2.6%) dengan pendekatan KOMPRESI/KOREKTIF/WAJAR dan ada fuel likuiditas — siap pasang Limit di 50% CE sebelum harga bereaksi! (Jika harga datang terjun bebas/marubozu liar, ubah ke "WATCHLIST" + "WAIT_SWEEP_TRIGGER").
-3. "REVERSAL WATCH" (execution_style="WAIT_SWEEP_TRIGGER"): Khusus setup HTF_REVERSAL saat harga mendekati/menguji Tembok 4H/1H mayor di ekstrem range — jangan pasang limit buta melawan tren kripto, wajib tunggu Judas Swing/Sweep + 15M CHOCH/CISD!
-4. "WATCHLIST": Setup bagus namun harga sudah memantul jauh (tunggu Limit Retest) atau sedang menguji zona tanpa konfirmasi close candle.
-5. "REJECT": Zona lemah/sudah berkali-kali disentuh, menabrak tembok 4H lawan tanpa ruang R:R (< 1.8), atau durasi terlalu lama.
-
-Balas HANYA dengan JSON valid murni (tanpa markdown/pengantar). WAJIB gunakan Bahasa Indonesia yang lugas pada seluruh isi teks JSON (termasuk smc_elements, detailed_analysis, forward_playbook, dan flip_scenario):
+Balas HANYA JSON valid murni dlm Bahasa Indonesia lugas (tiap sub-elemen smc_elements cukup 1 kalimat padat <=16 kata; fokus tajam pada detailed_analysis, forward_playbook, flip_scenario):
 {{
   "smc_elements": {{
-    "order_blocks": "peta OB/Breaker 4H, 1H, 15M & status kesegarannya (unmitigated vs mitigated)",
-    "liquidity_sweeps_runs": "status BSL/SSL sweep atau kolam EQH/EQL umpan Judas Swing",
-    "liquidity_range": "peta Range 4H & 1H (Low, High, EQ, Discount/Premium)",
-    "choch": "status CHOCH atau syarat CHOCH yang ditunggu",
-    "bos": "status BOS & kekuatan displacement",
-    "inducement": "level IDM / likuiditas pengumpan di depan POI",
-    "supply_demand": "zona Supply/Demand 4H-1H & ruang menuju tembok lawan",
-    "pin_bar": "reaksi wick / gaya kedatangan candle (kompresi vs impulsif) & CVD",
-    "cisd": "status CISD & konfirmasi Open Interest / L-S Ratio",
-    "poi": "zona POI presisi, taktik entry (50% CE vs Trigger), & estimasi durasi hold"
+    "order_blocks": "status OB/Breaker 4H-1H-15M & kesegarannya",
+    "liquidity_sweeps_runs": "status BSL/SSL sweep atau kolam EQH/EQL",
+    "liquidity_range": "posisi harga dlm Range 4H & 1H (Discount/Premium)",
+    "choch": "status/syarat CHOCH",
+    "bos": "status BOS & displacement",
+    "inducement": "status IDM di depan POI",
+    "supply_demand": "zona Supply/Demand & ruang ke tembok lawan",
+    "pin_bar": "reaksi wick/approach & CVD",
+    "cisd": "status CISD, OI, & L/S Ratio",
+    "poi": "zona POI, taktik entry, & durasi hold"
   }},
   "decision": "APPROVED" | "CONDITIONAL" | "REJECTED",
   "status": "ENTRY READY" | "PRE-TAP LIMIT" | "REVERSAL WATCH" | "WATCHLIST" | "REJECT",
@@ -278,9 +266,9 @@ Balas HANYA dengan JSON valid murni (tanpa markdown/pengantar). WAJIB gunakan Ba
   "tp1": {tp1},
   "tp2": {tp2},
   "rr": {rr:.2f},
-  "detailed_analysis": "ulasan padat SMC/ICT modern mengapa setup ini layak/ditunggu/ditolak sesuai karakter liar kripto",
-  "forward_playbook": "Langkah Utama (If-Then): apa yang sedang terjadi sekarang & tindakan spesifik yang harus dilakukan trader (level pasang limit / syarat trigger + aturan BEP di TP1)",
-  "flip_scenario": "Skenario Antisipasi / Flip: tanda apabila zona jebol impulsif (level close candle invalidasi) & cara berbalik arah memanfaatkan Breaker"
+  "detailed_analysis": "ulasan padat SMC/ICT modern sesuai karakter liar kripto",
+  "forward_playbook": "Langkah Utama (If-Then): kondisi sekarang, harga/pemicu entry spesifik, & aturan ambil 50% TP1 + geser SL ke BEP",
+  "flip_scenario": "Skenario Flip/Batal: level close candle invalidasi jika zona jebol impulsif & rencana balik arah (Breaker)"
 }}"""
     return prompt
 
@@ -297,7 +285,12 @@ def parse_llm_json(text: str) -> dict:
 
     cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     if "<think>" in cleaned.lower():
-        cleaned = re.sub(r"^.*?<think>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        # Jika blok <think> terpotong sebelum </think>, buang seluruh teks sebelum kurung '{' JSON
+        cleaned_after_think = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL | re.IGNORECASE).strip()
+        if "{" in cleaned_after_think:
+            cleaned = cleaned_after_think
+        else:
+            raise ValueError("Respons reasoning <think> terpotong sebelum objek JSON terbentuk")
 
     cleaned = cleaned.strip()
     if cleaned.startswith("```"):
@@ -348,6 +341,50 @@ def parse_llm_json(text: str) -> dict:
     return obj
 
 
+def _parse_reset_seconds(val: str) -> float:
+    """Mengurai header durasi Groq seperti '952ms', '5.4s', '1m12.3s', atau angka detik murni."""
+    if not val:
+        return 0.0
+    s = val.strip().lower()
+    if s.replace(".", "", 1).isdigit():
+        return float(s)
+    total = 0.0
+    m_min = re.search(r"(\d+(?:\.\d+)?)m(?!s)", s)
+    if m_min:
+        total += float(m_min.group(1)) * 60.0
+    m_ms = re.search(r"(\d+(?:\.\d+)?)ms", s)
+    if m_ms:
+        total += float(m_ms.group(1)) / 1000.0
+    s_no_ms = re.sub(r"\d+(?:\.\d+)?ms", "", s)
+    m_sec = re.search(r"(\d+(?:\.\d+)?)s", s_no_ms)
+    if m_sec:
+        total += float(m_sec.group(1))
+    return total
+
+
+def _record_ratelimit_headers(mdl: str, hdrs: Any, is_429: bool = False) -> float:
+    """Mencatat sisa kuota TPM & waktu cooldown per model dari header respons Groq."""
+    rem_str = hdrs.get("x-ratelimit-remaining-tokens", "")
+    rst_tok = _parse_reset_seconds(hdrs.get("x-ratelimit-reset-tokens", ""))
+    retry_s = _parse_reset_seconds(hdrs.get("Retry-After", ""))
+    wait_s = retry_s or rst_tok
+    with _RATE_LOCK:
+        now = time.monotonic()
+        if rem_str.isdigit():
+            rem_tok = int(rem_str)
+            _MODEL_REMAINING_TPM[mdl] = rem_tok
+            # Jika sisa token tidak cukup untuk 1 audit penuh (~1.950 token), alihkan sementara ke model berikutnya
+            if not is_429 and rem_tok < 1950:
+                cd = min(max(wait_s, 3.0), 12.0)
+                _MODEL_COOLDOWN_UNTIL[mdl] = max(_MODEL_COOLDOWN_UNTIL.get(mdl, 0.0), now + cd)
+        if is_429:
+            cd = min(max(wait_s if wait_s > 0 else 8.0, 3.0), 24.0)
+            _MODEL_COOLDOWN_UNTIL[mdl] = max(_MODEL_COOLDOWN_UNTIL.get(mdl, 0.0), now + cd)
+            _MODEL_REMAINING_TPM[mdl] = 0
+            return cd
+    return wait_s
+
+
 def _pace_request() -> None:
     global _LAST_CALL_TS
     with _RATE_LOCK:
@@ -358,50 +395,93 @@ def _pace_request() -> None:
         _LAST_CALL_TS = time.monotonic()
 
 
+def _order_models_by_capacity(base_models: List[str]) -> List[str]:
+    """Mengurutkan model berdasarkan kesiapan kuota TPM & jumlah request paralel aktif."""
+    with _RATE_LOCK:
+        now = time.monotonic()
+        scored = []
+        for idx, m in enumerate(base_models):
+            if m in _UNAVAILABLE_MODELS:
+                continue
+            cd_left = max(0.0, _MODEL_COOLDOWN_UNTIL.get(m, 0.0) - now)
+            inflight = _MODEL_INFLIGHT.get(m, 0)
+            rem_tpm = _MODEL_REMAINING_TPM.get(m, 8000)
+            est_free = rem_tpm - (inflight * 2000)
+            # Prioritaskan model yang bebas cooldown & estimasi tokennya masih cukup untuk 1 audit penuh
+            busy_rank = 0 if (cd_left <= 0.0 and est_free >= 1900) else (1 if cd_left <= 0.0 else 2)
+            scored.append((busy_rank, round(cd_left, 1), inflight, idx, m))
+        scored.sort()
+        return [item[4] for item in scored]
+
+
 def call_groq_api(prompt: str, model: Optional[str] = None, api_key: Optional[str] = None) -> Optional[dict]:
-    """Mengirim permintaan ke Groq Cloud API dengan koneksi persisten cepat, pacing, & multi-model fallback."""
+    """Mengirim permintaan ke Groq Cloud API dengan penyeimbang TPM multi-model, failover 429 instan, & proteksi JSON."""
     key = api_key or get_groq_key()
     if not key:
         return None
 
     primary_model = model or get_default_model()
     fallback_model = get_fallback_model()
-    safety_model = "llama-3.3-70b-versatile"
+    safety_model = get_safety_model()
 
-    models_to_try: List[str] = []
+    base_models: List[str] = []
     for m in (primary_model, fallback_model, safety_model):
-        if m and m not in models_to_try and m not in _UNAVAILABLE_MODELS:
-            models_to_try.append(m)
-    if not models_to_try:
-        models_to_try = [safety_model]
+        if m and m not in base_models and m not in _UNAVAILABLE_MODELS:
+            base_models.append(m)
+    if not base_models:
+        base_models = [safety_model]
 
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
     sess = _get_http_session()
+    last_err: Optional[str] = None
 
-    for mdl in models_to_try:
-        payload = {
-            "model": mdl,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Anda adalah Kurator Utama Modern SMC/ICT Crypto Futures. "
-                        "Kembalikan HANYA objek JSON valid murni tanpa teks pengantar apa pun."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 1800,
-        }
-        for attempt in range(3):
-            _pace_request()
+    for pool_pass in range(3):
+        ordered = _order_models_by_capacity(base_models)
+        if not ordered:
+            break
+
+        # Jika seluruh model sedang cooldown TPM, tidur tepat sampai kuota terdekat pulih
+        with _RATE_LOCK:
+            now = time.monotonic()
+            waits = [max(0.0, _MODEL_COOLDOWN_UNTIL.get(m, 0.0) - now) for m in ordered]
+        min_cd = min(waits) if waits else 0.0
+        if min_cd > 0.25:
+            time.sleep(min(min_cd + 0.5, 24.5))
+
+        for mdl in ordered:
+            if mdl in _UNAVAILABLE_MODELS:
+                continue
+
+            use_low_reasoning = "gpt-oss" in mdl.lower()
+            payload: Dict[str, Any] = {
+                "model": mdl,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Anda adalah Kurator Utama Modern SMC/ICT Crypto Futures. "
+                            "Kembalikan HANYA objek JSON valid murni tanpa teks pengantar apa pun. "
+                            "WAJIB gunakan Bahasa Indonesia pada seluruh isi nilai JSON."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.1,
+                "max_tokens": 2400,
+            }
+            if use_low_reasoning:
+                payload["reasoning_effort"] = "low"
+
+            with _RATE_LOCK:
+                _MODEL_INFLIGHT[mdl] = _MODEL_INFLIGHT.get(mdl, 0) + 1
             try:
-                res = sess.post(GROQ_ENDPOINT, headers=headers, json=payload, timeout=24)
+                _pace_request()
+                res = sess.post(GROQ_ENDPOINT, headers=headers, json=payload, timeout=26)
                 if res.status_code == 200:
+                    _record_ratelimit_headers(mdl, res.headers, is_429=False)
                     data = res.json()
                     choices = data.get("choices", [])
                     if choices:
@@ -410,20 +490,39 @@ def call_groq_api(prompt: str, model: Optional[str] = None, api_key: Optional[st
                         parsed["model"] = mdl
                         return parsed
                 elif res.status_code == 429:
-                    retry_hdr = res.headers.get("Retry-After", "")
-                    wait_s = float(retry_hdr) if retry_hdr.replace(".", "", 1).isdigit() else (2.0 * (attempt + 1))
-                    time.sleep(min(wait_s, 12.0))
+                    # Langsung catat cooldown TPM model ini & lompat instan ke model sehat berikutnya tanpa tidur sia-sia
+                    _record_ratelimit_headers(mdl, res.headers, is_429=True)
+                    last_err = f"HTTP 429 rate-limit TPM pada {mdl}"
+                    continue
+                elif res.status_code == 400 and "reasoning_effort" in payload:
+                    payload.pop("reasoning_effort", None)
+                    res2 = sess.post(GROQ_ENDPOINT, headers=headers, json=payload, timeout=26)
+                    if res2.status_code == 200:
+                        _record_ratelimit_headers(mdl, res2.headers, is_429=False)
+                        choices = res2.json().get("choices", [])
+                        if choices:
+                            parsed = parse_llm_json(choices[0].get("message", {}).get("content", ""))
+                            parsed["model"] = mdl
+                            return parsed
+                    _UNAVAILABLE_MODELS.add(mdl)
+                    last_err = f"HTTP {res2.status_code} pada {mdl}"
                     continue
                 elif res.status_code in (400, 404):
                     _UNAVAILABLE_MODELS.add(mdl)
-                    break
+                    last_err = f"HTTP {res.status_code} (model tidak tersedia: {mdl})"
+                    continue
                 else:
-                    time.sleep(1.2 * (attempt + 1))
+                    last_err = f"HTTP {res.status_code} pada {mdl}"
+                    time.sleep(0.8 * (pool_pass + 1))
             except Exception as e:
-                if attempt == 2:
-                    print(f"[AI Validator] Model {mdl} gagal pada percobaan terakhir: {e}", file=sys.stderr)
-                time.sleep(1.0 * (attempt + 1))
+                last_err = f"{mdl}: {e}"
+                time.sleep(0.6 * (pool_pass + 1))
+            finally:
+                with _RATE_LOCK:
+                    _MODEL_INFLIGHT[mdl] = max(0, _MODEL_INFLIGHT.get(mdl, 1) - 1)
 
+    if last_err:
+        print(f"[AI Validator] Seluruh model cadangan sibuk/gagal ({last_err})", file=sys.stderr)
     return None
 
 
@@ -475,6 +574,8 @@ def audit_smc_setup(setup: Any, btc_ctx: Optional[dict] = None, model: Optional[
 
         if status == "PRE-TAP LIMIT" and app_code == "IMPULSIF_LIAR":
             status = "WATCHLIST"
+        if arch == "HTF_REVERSAL" and status == "PRE-TAP LIMIT":
+            status = "REVERSAL WATCH"
 
         exec_st = str(result.get("execution_style", "")).upper().strip()
         if exec_st not in VALID_EXEC_STYLES:
@@ -634,7 +735,7 @@ def audit_top_setups(
     results: List[Any],
     btc_ctx: Optional[dict] = None,
     max_audit: int = 10,
-    workers: int = 4,
+    workers: int = 3,
     equity: float = 0.0,
     risk_pct: float = 1.0,
     fee_pct: float = 0.05,

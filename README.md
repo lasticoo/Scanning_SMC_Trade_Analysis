@@ -53,7 +53,7 @@ Tidak lagi kaku hanya mengikuti tren setelah harga terlanjur memantul (*post-rea
 - **Analisa Dinamika Pendekatan (*Approach Style*)**: Membedakan pendekatan **`KOMPRESI_KOREKTIF`** (ideal untuk `Limit Pre-Tap`), **`PULLBACK_WAJAR`** (ideal `Limit 50% CE`), dan **`IMPULSIF_LIAR`** (*falling knife* / marubozu — otomatis dilarang pasang limit buta dan dialihkan ke `Wait Sweep/CISD`).
 
 ### 3. Kurator AI SMC/ICT Kripto Modern (`ai_validator.py`)
-- **Kilasan Cepat Python + Kurasi Paralel Groq**: Menampilkan ringkasan hasil Python secara instan dalam ~6–7 detik, lalu memanggil Groq LLM secara paralel (*persistent HTTP session*, `4 workers`) pada daftar berimbang lintas 3 variasi (`ENTRY READY`, `PRE-TAP LIMIT`, `REVERSAL WATCH`, dan `WATCHLIST`).
+- **Kilasan Cepat Python + Kurasi Paralel Groq**: Menampilkan ringkasan hasil Python secara instan dalam ~5–6 detik, lalu memanggil Groq LLM secara paralel (*persistent HTTP session*, `3 workers` dengan penyeimbang kuota TPM lintas model `qwen/qwen3.8-27b`, `openai/gpt-oss-120b`, & `openai/gpt-oss-20b`) pada daftar berimbang lintas 3 variasi (`ENTRY READY`, `PRE-TAP LIMIT`, `REVERSAL WATCH`, dan `WATCHLIST`).
 - **Adaptif terhadap Karakter Liar Kripto**: AI mengevaluasi risiko *stop-hunt wick* (*Judas Swing* / `EQH`/`EQL` di depan POI), kecepatan *approach*, kualitas *orderflow* (`CVD`, `OI`, *Top Trader vs Retail L/S*), dan memilih taktik eksekusi terbaik (`ENTRY_NOW`, `LIMIT_PRE_TAP`, `WAIT_SWEEP_TRIGGER`, `LIMIT_RETEST`, atau `SKIP`), lengkap dengan *post-AI safety guardrails* dan proteksi skor `0`.
 
 ### 4. Panduan Langkah Kedepan (*Forward If–Then Playbook & Antisipasi Flip*)
