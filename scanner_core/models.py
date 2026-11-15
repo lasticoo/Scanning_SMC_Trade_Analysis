@@ -24,8 +24,8 @@ class Config:
     strategy: str = "smc"           # "smc", "breakout", "all"
     smc_entry_score: int = 70
     smc_watch_score: int = 52
-    # pola konsolidasi (breakout)
-    piv_len: int = 5
+    # pola konsolidasi (breakout) & fractal SMC (4H/1H N=3, 15M N=2)
+    piv_len: int = 2
     min_pat: int = 15
     max_pat: int = 100
     conv_ratio: float = 0.85
@@ -43,22 +43,22 @@ class Config:
     retest_tol: float = 0.3
     event_recent_bars: int = 6      # event dianggap "aktif" jika terjadi dalam N bar 15M terakhir
     # risk management & Top-Down MTF "Zoom-Out Check" (proporsional 1H)
-    sl_buffer: float = 0.30         # buffer struktural (dikalikan ATR 1H pada MTF SMC)
+    sl_buffer: float = 0.20         # buffer struktural (0.15-0.20x ATR sesuai aturan teknis SMC)
     min_risk_atr: float = 0.6       # fallback kompatibilitas lama
-    min_sl_atr_1h: float = 1.15     # batas bawah anti-terlalu-sempit: minimal 1.15x ATR 1H
-    max_sl_atr_1h: float = 2.25     # batas atas anti-terlalu-lebar: maksimal 2.25x ATR 1H
-    min_sl_range_1h: float = 0.16   # minimal 16% dari lebar Working Range 1H
-    max_sl_range_1h: float = 0.38   # maksimal 38% dari lebar Working Range 1H
-    min_sl_pct_major: float = 0.0080  # 0.80% floor untuk BTC/ETH
-    min_sl_pct_alt: float = 0.0115    # 1.15% floor untuk altcoin & high-beta futures
-    max_hold_hours: float = 36.0    # batas ideal durasi posisi agar tidak lama terkena funding
+    min_sl_atr_1h: float = 1.05     # batas bawah anti-terlalu-sempit: minimal 1.05x ATR 1H
+    max_sl_atr_1h: float = 2.10     # batas atas anti-terlalu-lebar: maksimal 2.10x ATR 1H
+    min_sl_range_1h: float = 0.15   # minimal 15% dari lebar Working Range 1H
+    max_sl_range_1h: float = 0.35   # maksimal 35% dari lebar Working Range 1H
+    min_sl_pct_major: float = 0.0075  # 0.75% floor untuk BTC/ETH
+    min_sl_pct_alt: float = 0.0110    # 1.10% floor untuk altcoin & high-beta futures
+    max_hold_hours: float = 30.0    # batas ideal durasi posisi agar tidak hold terlalu lama
     mm_factor: float = 1.0
-    min_rr: float = 3.0             # wajib R:R minimal 1:3.0 sesuai gaya trader
+    min_rr: float = 3.0             # wajib R:R efektif minimal 1:3.0 (jika kurang -> REJECT)
     fixed_sl_no_bep: bool = True    # Set-and-Forget SL di balik likuiditas (pantang geser SL ke BEP)
     entry_score: int = 80
     watch_score: int = 65
-    # konteks HTF
-    htf_piv: int = 4
+    # konteks HTF (Fractal 4H dan H1 pakai N=3)
+    htf_piv: int = 3
     # universe & likuiditas
     min_vol_usdt: float = 50e6
     max_spread_bps: float = 6.0
@@ -74,14 +74,14 @@ class Config:
     fetch_derivatives: bool = True  # ambil Open Interest & Long/Short Ratio publik
     # evaluasi Full LLM (Groq)
     ai_audit: bool = True
-    ai_top_n: int = 8               # kuota kurasi AI terfokus pada 3 Pilar Paten (hemat token & cepat)
-    focus_3_pillars: bool = True    # fokus ke 3 Pilar Paten: REVERSAL WATCH, PRE-TAP LIMIT, & SMC_SNIPER (>=75)
+    ai_top_n: int = 10              # kuota kurasi AI terfokus pada kandidat 3 Pilar Paten & borderline valid R:R >= 1:3.0
+    focus_3_pillars: bool = True    # fokus ke 3 Pilar Paten: REVERSAL WATCH, PRE-TAP DEKAT, & SMC_SNIPER (>=75)
     # filter & radar lokasi harga di Demand/Supply/POI/Sweep + Pre-Reaction Stalker
     only_in_zone: bool = False      # tampilkan hanya koin yang sudah di/dekat POI atau baru saja sweep
     radar_mode: bool = False        # fokus tampilan Radar Zona & Liquidity Sweep Live
-    near_poi_pct: float = 0.50      # radius % dari bibir zona untuk status APPROACHING_POI
-    max_stalk_atr_1h: float = 1.65  # batas jarak pendekatan Pre-Reaction (maks ~1-4 jam perjalanan harga)
-    max_stalk_pct: float = 2.60     # batas jarak % maksimal menuju Fresh POI agar tidak menunggu lama
+    near_poi_pct: float = 0.45      # radius % dari bibir zona untuk status APPROACHING_POI
+    max_stalk_atr_1h: float = 0.75  # batas jarak pendekatan maksimal 0.75x ATR 1H (sudah dekat zona entry)
+    max_stalk_pct: float = 1.35     # batas jarak % maksimal menuju POI agar tidak menunggu lama
 
 
 @dataclass

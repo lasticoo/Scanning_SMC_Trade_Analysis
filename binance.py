@@ -153,12 +153,13 @@ def _eval_strategy(
     meta: dict,
     cfg: Config,
     deriv: Optional[dict] = None,
+    btc: Optional[dict] = None,
 ) -> Optional[Setup]:
     if cfg.strategy == "smc":
-        return analyze_smc_symbol(sym, df15, ctx4, ctx1, meta, cfg, df4=df4, df1=df1, deriv=deriv)
+        return analyze_smc_symbol(sym, df15, ctx4, ctx1, meta, cfg, df4=df4, df1=df1, deriv=deriv, btc=btc)
     if cfg.strategy == "breakout":
         return analyze_symbol(sym, df15, ctx4, ctx1, meta, cfg, df4=df4, df1=df1, deriv=deriv)
-    s_smc = analyze_smc_symbol(sym, df15, ctx4, ctx1, meta, cfg, df4=df4, df1=df1, deriv=deriv)
+    s_smc = analyze_smc_symbol(sym, df15, ctx4, ctx1, meta, cfg, df4=df4, df1=df1, deriv=deriv, btc=btc)
     s_bk = analyze_symbol(sym, df15, ctx4, ctx1, meta, cfg, df4=df4, df1=df1, deriv=deriv)
     if s_smc and s_bk:
         return s_smc if s_smc.score >= s_bk.score else s_bk
@@ -197,11 +198,14 @@ def reason_reject(s: Setup, cfg: Config) -> str:
         return f"Ditolak AI Kurator: {trim(getattr(s, 'ai_summary', 'Kriteria MTF SMC tidak terpenuhi'), 72)}"
     if s.status == "EXTENDED":
         return "Entry sudah jauh dari POI (tunggu pullback limit)"
-    min_w = cfg.smc_watch_score if s.kind.startswith("SMC") else cfg.watch_score
-    if s.score < min_w:
-        return f"Score {s.score:.0f} < {min_w}"
     if s.rr < cfg.min_rr:
         return f"RR 1:{s.rr:.1f} < 1:{cfg.min_rr:.1f} (terbatas tembok HTF / durasi)"
+    for nt in getattr(s, "notes", []):
+        if nt.startswith("Ditolak") or nt.startswith("Disaring"):
+            return trim(nt, 88)
+    min_w = 65 if getattr(s, "archetype", "") == "HTF_REVERSAL" else 75
+    if s.score < min_w:
+        return f"Score {s.score:.0f} < {min_w} (ambang minimal)"
     return "Menunggu konfirmasi trigger / ruang target belum memadai"
 
 
@@ -413,13 +417,16 @@ def build_report(
     )
 
     ready_list = [r for r in valid if r.status == "ENTRY READY"]
-    pretap_list = [r for r in valid if r.status == "PRE-TAP LIMIT" or r.zone_state == "FIRST_TOUCH_NOW"]
-    # Hindari duplikasi simbol jika FIRST_TOUCH_NOW sudah masuk ready_list
     ready_syms = {r.symbol for r in ready_list}
-    pretap_list = [r for r in pretap_list if r.symbol not in ready_syms]
-    pretap_syms = {r.symbol for r in pretap_list}
-    rev_list = [r for r in valid if r.status == "REVERSAL WATCH" and r.symbol not in ready_syms and r.symbol not in pretap_syms]
+    rev_list = [r for r in valid if r.status == "REVERSAL WATCH" and r.symbol not in ready_syms]
     rev_syms = {r.symbol for r in rev_list}
+    pretap_list = [
+        r for r in valid
+        if (r.status == "PRE-TAP LIMIT" or r.zone_state == "FIRST_TOUCH_NOW")
+        and r.symbol not in ready_syms
+        and r.symbol not in rev_syms
+    ]
+    pretap_syms = {r.symbol for r in pretap_list}
     watch_list = [r for r in valid if r.symbol not in ready_syms and r.symbol not in pretap_syms and r.symbol not in rev_syms]
 
     rejected = [r for r in results if not _is_active_setup(r) and r.status != "NO SETUP"]
@@ -535,8 +542,8 @@ def build_report(
 
     section("A. ENTRY READY — Sudah Konfirmasi Reaksi di POI (Siap Eksekusi)", ready_list, show_playbook_hint=True)
     section("B. PILAR 2: PRE-TAP LIMIT & FIRST TOUCH — Mendekati OB Segar (0-Touch) SEBELUM Bereaksi", pretap_list, show_playbook_hint=True)
-    section("C. PILAR 1: REVERSAL WATCH — Keterbalikan Tren di Tembok Kunci 4H/1H (Tunggu Sweep + Shift)", rev_list, show_playbook_hint=True)
-    section("D. PILAR 3: SMC SNIPER WATCHLIST — Pantauan Sniper Skor >= 75 Menunggu Close Konfirmasi", watch_list, show_playbook_hint=False)
+    section("C. PILAR 1: REVERSAL WATCH SMC BERTAHAP (4H -> H1 -> M15) — Pantauan Tahap 1 s/d 5 (Skor >= 6.5/10)", rev_list, show_playbook_hint=True)
+    section("D. PILAR 3: SMC SNIPER WATCHLIST — Pantauan Sniper Follow-Trend Skor >= 75 Menunggu Close Konfirmasi", watch_list, show_playbook_hint=False)
 
     if not cfg.radar_mode:
         render_radar_section()
@@ -772,7 +779,7 @@ async def _scan_universe_async(cfg: Config, only: Optional[List[str]]) -> Tuple[
                     return None
                 ctx4 = htf_context(df4, cfg.htf_piv)
                 ctx1 = htf_context(df1, cfg.htf_piv)
-                st = _eval_strategy(sym, df4, df1, df15, ctx4, ctx1, meta, cfg)
+                st = _eval_strategy(sym, df4, df1, df15, ctx4, ctx1, meta, cfg, btc=btc)
                 if st is not None:
                     cached_bundles[sym] = (df4, df1, df15, ctx4, ctx1, meta)
                 rh = _compute_symbol_radar(sym, df4, df1, df15, ctx4, ctx1, cfg, st)
@@ -793,7 +800,7 @@ async def _scan_universe_async(cfg: Config, only: Optional[List[str]]) -> Tuple[
             deriv_map_list = await asyncio.gather(*(api.fetch_derivatives(s.symbol) for s in prelim))
             for st_old, drv in zip(prelim, deriv_map_list):
                 df4, df1, df15, ctx4, ctx1, meta = cached_bundles[st_old.symbol]
-                st_new = _eval_strategy(st_old.symbol, df4, df1, df15, ctx4, ctx1, meta, cfg, deriv=drv)
+                st_new = _eval_strategy(st_old.symbol, df4, df1, df15, ctx4, ctx1, meta, cfg, deriv=drv, btc=btc)
                 final_st = st_new if st_new is not None else st_old
                 results.append(final_st)
                 if final_st.symbol in radar_map:
@@ -832,10 +839,10 @@ def _scan_universe_sync(cfg: Config, only: Optional[List[str]]) -> Tuple[list, L
             return sym, None, None
         ctx4 = htf_context(df4, cfg.htf_piv)
         ctx1 = htf_context(df1, cfg.htf_piv)
-        setup = _eval_strategy(sym, df4, df1, df15, ctx4, ctx1, meta, cfg)
+        setup = _eval_strategy(sym, df4, df1, df15, ctx4, ctx1, meta, cfg, btc=btc)
         if setup is not None and cfg.fetch_derivatives:
             deriv = api.fetch_derivatives(sym)
-            setup = _eval_strategy(sym, df4, df1, df15, ctx4, ctx1, meta, cfg, deriv=deriv)
+            setup = _eval_strategy(sym, df4, df1, df15, ctx4, ctx1, meta, cfg, deriv=deriv, btc=btc)
         rh = _compute_symbol_radar(sym, df4, df1, df15, ctx4, ctx1, cfg, setup)
         return sym, setup, rh
 
@@ -1033,7 +1040,7 @@ def main() -> None:
     if args.track:
         summary, _ = run_signal_tracker(
             scan_dir=args.out,
-            max_hold_hours=args.max_hold,
+            max_hold_hours=max(args.max_hold, 60.0),
             include_watchlist=args.include_watchlist,
             fee_pct=args.fee_pct,
         )

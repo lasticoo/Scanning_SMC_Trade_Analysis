@@ -121,7 +121,8 @@ def analyze_symbol(
     rel = (df15["volume"] / vol_sma).values
     ema20 = ema(df15["close"], 20).values
     rsi = rsi_wilder(df15["close"]).values
-    is_ph, is_pl = find_pivots(h, l, cfg.piv_len)
+    brk_piv = max(cfg.piv_len, 4)
+    is_ph, is_pl = find_pivots(h, l, brk_piv)
 
     atr_1h = float(ctx1.get("atr", NAN))
     if math.isnan(atr_1h) or atr_1h <= 0:
@@ -155,7 +156,7 @@ def analyze_symbol(
         wStart = (uNow - uS * plen) - (lNow - lS * plen)
         spanU, spanL = uS * plen, lS * plen
         len_ok = cfg.min_pat <= plen <= cfg.max_pat
-        recent_ok = (t - max(S["pH2I"], S["pL2I"])) <= max(cfg.piv_len * 8, plen / 2)
+        recent_ok = (t - max(S["pH2I"], S["pL2I"])) <= max(brk_piv * 8, plen / 2)
         ordered = uNow > lNow and wStart > 0
         is_conv = ordered and wNow <= wStart * cfg.conv_ratio and wNow >= 0.5 * a
         is_par = ordered and 0.75 * wStart <= wNow <= 1.3 * wStart

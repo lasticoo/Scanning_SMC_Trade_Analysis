@@ -66,7 +66,7 @@ def simulate_trade_on_bars(
     tp2: float,
     require_limit_tap: bool,
     future_df: pd.DataFrame,
-    max_hold_hours: float = 48.0,
+    max_hold_hours: float = 60.0,
     fee_pct: float = 0.04,
     is_historical_complete: bool = True,
     move_sl_to_bep: bool = False,
@@ -95,7 +95,7 @@ def simulate_trade_on_bars(
     times = future_df["open_time"].values.astype("int64")
 
     max_bars = max(4, int(round(max_hold_hours * 4)))
-    limit_wait_bars = min(len(future_df), 16)  # tunggu retest limit maks 4 jam (16 bar 15m)
+    limit_wait_bars = min(len(future_df), 24)  # tunggu retest limit maks 6 jam (24 bar 15m)
 
     start_bar = 0
     actual_entry = entry_price
@@ -298,7 +298,7 @@ def _build_metrics_summary(df_trades: pd.DataFrame, title: str) -> str:
 
 async def _track_signals_async(
     scan_dir: str = "scan_output",
-    max_hold_hours: float = 48.0,
+    max_hold_hours: float = 60.0,
     include_watchlist: bool = False,
     fee_pct: float = 0.04,
 ) -> Tuple[str, pd.DataFrame]:
@@ -418,7 +418,7 @@ async def _track_signals_async(
     res_df = pd.DataFrame(trade_records)
     summary = _build_metrics_summary(
         res_df,
-        f"SIGNAL PERFORMANCE TRACKER REPORT  |  Folder: {scan_dir}  |  Max Hold: {max_hold_hours:.0f}h  |  Split TP1(50%)+TP2(50%)",
+        f"SIGNAL PERFORMANCE TRACKER REPORT  |  Folder: {scan_dir}  |  Max Hold: {max_hold_hours:.0f}h  |  Fixed SL (No BEP) -> Target Utama TP2 (>=1:3.0R)",
     )
 
     os.makedirs(scan_dir, exist_ok=True)
@@ -431,7 +431,7 @@ async def _track_signals_async(
 
 def run_signal_tracker(
     scan_dir: str = "scan_output",
-    max_hold_hours: float = 48.0,
+    max_hold_hours: float = 60.0,
     include_watchlist: bool = False,
     fee_pct: float = 0.04,
 ) -> Tuple[str, pd.DataFrame]:
