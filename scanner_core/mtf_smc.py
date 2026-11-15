@@ -40,6 +40,14 @@ from .zone_radar import (
 )
 
 
+def _count_visits(inside: np.ndarray) -> int:
+    """Hitung jumlah kunjungan (episode kontak berurutan = 1 kunjungan), bukan jumlah bar."""
+    b = np.asarray(inside, dtype=bool)
+    if b.size == 0:
+        return 0
+    return int(b[0]) + int(np.sum(b[1:] & ~b[:-1]))
+
+
 def extract_tf_structure(df: Optional[pd.DataFrame], piv_len: int, tf_label: str, lookback_bars: int = 90) -> Optional[dict]:
     """
     Mengekstrak peta struktur lengkap satu timeframe secara bebas look-ahead:
@@ -111,9 +119,9 @@ def extract_tf_structure(df: Optional[pd.DataFrame], piv_len: int, tf_label: str
         if l[i] - h[i - 2] >= fvg_min_mult * a:
             raw_fvg_idx.add((i, 1))
             r_top, r_bot = float(l[i]), float(h[i - 2])
-            if i + 1 <= n - 2:
-                sub_c = c[i + 1 : n - 1]
-                sub_l = l[i + 1 : n - 1]
+            if i + 1 <= n - 1:
+                sub_c = c[i + 1 : n]
+                sub_l = l[i + 1 : n]
                 if np.min(sub_c) < r_bot or np.min(sub_l) <= r_bot + 0.08 * (r_top - r_bot):
                     continue
                 eff_top = min(r_top, float(np.min(sub_l)))
@@ -130,9 +138,9 @@ def extract_tf_structure(df: Optional[pd.DataFrame], piv_len: int, tf_label: str
         elif l[i - 2] - h[i] >= fvg_min_mult * a:
             raw_fvg_idx.add((i, -1))
             r_top, r_bot = float(l[i - 2]), float(h[i])
-            if i + 1 <= n - 2:
-                sub_c = c[i + 1 : n - 1]
-                sub_h = h[i + 1 : n - 1]
+            if i + 1 <= n - 1:
+                sub_c = c[i + 1 : n]
+                sub_h = h[i + 1 : n]
                 if np.max(sub_c) > r_top or np.max(sub_h) >= r_top - 0.08 * (r_top - r_bot):
                     continue
                 eff_bot = max(r_bot, float(np.max(sub_h)))
@@ -176,15 +184,13 @@ def extract_tf_structure(df: Optional[pd.DataFrame], piv_len: int, tf_label: str
                 disp_rat = round(disp_move / max(a, 1e-12), 2)
 
                 broken_idx = None
-                touches = 0
-                for j in range(end_d + 1, n - 1):
+                for j in range(end_d + 1, n):
                     if c[j] < ob_bot - 0.08 * a:
                         broken_idx = j
                         break
-                    if l[j] <= ob_top:
-                        touches += 1
 
                 if broken_idx is None:
+                    touches = _count_visits(l[end_d + 1 : n] <= ob_top)
                     if touches <= 2:
                         bull_obs.append({
                             "tf": tf_label, "idx": i, "dir": 1, "top": ob_top, "bot": ob_bot,
@@ -196,8 +202,8 @@ def extract_tf_structure(df: Optional[pd.DataFrame], piv_len: int, tf_label: str
                         })
                 else:
                     bj = broken_idx
-                    if (o[bj] - c[bj]) >= 0.70 * a and (bj + 1 >= n - 1 or np.max(c[bj + 1 : n - 1]) <= ob_top + 0.1 * a):
-                        brk_touches = sum(1 for j in range(bj + 1, n - 1) if h[j] >= ob_bot)
+                    if (o[bj] - c[bj]) >= 0.70 * a and (bj + 1 >= n or np.max(c[bj + 1 : n]) <= ob_top + 0.1 * a):
+                        brk_touches = _count_visits(h[bj + 1 : n] >= ob_bot)
                         if brk_touches <= 2:
                             breakers.append({
                                 "tf": tf_label, "idx": bj, "dir": -1, "top": ob_top, "bot": ob_bot,
@@ -228,15 +234,13 @@ def extract_tf_structure(df: Optional[pd.DataFrame], piv_len: int, tf_label: str
                 disp_rat = round(disp_move / max(a, 1e-12), 2)
 
                 broken_idx = None
-                touches = 0
-                for j in range(end_d + 1, n - 1):
+                for j in range(end_d + 1, n):
                     if c[j] > ob_top + 0.08 * a:
                         broken_idx = j
                         break
-                    if h[j] >= ob_bot:
-                        touches += 1
 
                 if broken_idx is None:
+                    touches = _count_visits(h[end_d + 1 : n] >= ob_bot)
                     if touches <= 2:
                         bear_obs.append({
                             "tf": tf_label, "idx": i, "dir": -1, "top": ob_top, "bot": ob_bot,
@@ -248,8 +252,8 @@ def extract_tf_structure(df: Optional[pd.DataFrame], piv_len: int, tf_label: str
                         })
                 else:
                     bj = broken_idx
-                    if (c[bj] - o[bj]) >= 0.70 * a and (bj + 1 >= n - 1 or np.min(c[bj + 1 : n - 1]) >= ob_bot - 0.1 * a):
-                        brk_touches = sum(1 for j in range(bj + 1, n - 1) if l[j] <= ob_top)
+                    if (c[bj] - o[bj]) >= 0.70 * a and (bj + 1 >= n or np.min(c[bj + 1 : n]) >= ob_bot - 0.1 * a):
+                        brk_touches = _count_visits(l[bj + 1 : n] <= ob_top)
                         if brk_touches <= 2:
                             breakers.append({
                                 "tf": tf_label, "idx": bj, "dir": 1, "top": ob_top, "bot": ob_bot,
@@ -271,7 +275,7 @@ def extract_tf_structure(df: Optional[pd.DataFrame], piv_len: int, tf_label: str
             lvl = max(s1["price"], s2["price"])
             tol_eq = max(0.25 * cur_atr, 0.0015 * lvl)
             if abs(s1["price"] - s2["price"]) <= tol_eq:
-                after_slice = h[s2["idx"] + 1 : n - 1]
+                after_slice = h[s2["idx"] + 1 : n]
                 if len(after_slice) == 0 or float(np.max(after_slice)) <= lvl + 0.05 * cur_atr:
                     if not any(abs(lvl - x) <= 0.15 * cur_atr for x in eqh_pools):
                         eqh_pools.append(lvl)
@@ -286,7 +290,7 @@ def extract_tf_structure(df: Optional[pd.DataFrame], piv_len: int, tf_label: str
             lvl = min(s1["price"], s2["price"])
             tol_eq = max(0.25 * cur_atr, 0.0015 * lvl)
             if abs(s1["price"] - s2["price"]) <= tol_eq:
-                after_slice = l[s2["idx"] + 1 : n - 1]
+                after_slice = l[s2["idx"] + 1 : n]
                 if len(after_slice) == 0 or float(np.min(after_slice)) >= lvl - 0.05 * cur_atr:
                     if not any(abs(lvl - x) <= 0.15 * cur_atr for x in eql_pools):
                         eql_pools.append(lvl)
@@ -2263,8 +2267,12 @@ def analyze_smc_symbol(
 
         if mss_h1 and int(mss_h1.get("bars_since_sweep", 99)) <= 20:
             # Pastikan MSS H1 masih relevan dengan posisi harga saat ini (belum kedaluwarsa & belum ditembus balik)
-            imp_lo = float(mss_h1["imp_low"])
-            imp_hi = float(mss_h1["imp_high"])
+            if d_rev == 1:
+                imp_lo = float(mss_h1["sweep_low"])
+                imp_hi = float(mss_h1["impulse_high"])
+            else:
+                imp_hi = float(mss_h1["sweep_high"])
+                imp_lo = float(mss_h1["impulse_low"])
             imp_span = max(imp_hi - imp_lo, 1e-12)
             if d_rev == 1:
                 # Batal jika harga close di bawah low sweep impuls MSS, atau sudah lari jauh > 50% impuls berikutnya tanpa retrace
