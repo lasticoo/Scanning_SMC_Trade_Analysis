@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from .evidence import build_evidence
 from .indicators import (
     atr_wilder,
     compute_cvd_metrics,
@@ -1028,6 +1029,19 @@ def populate_forward_playbook(s: Setup) -> None:
             f"Skenario Invalidasi / Flip: Jika candle 15M/1H close menembus SL {fp(s.sl)}, struktur tren patah "
             f"(CHOCH ke {opp_dir}) — terima risiko 1R disiplin & pantau peluang balik arah {opp_dir}."
         )
+
+
+def _safe_evidence(
+    setup: Setup,
+    df4: Optional[pd.DataFrame],
+    df1: Optional[pd.DataFrame],
+    df15: Optional[pd.DataFrame],
+    btc: Optional[dict] = None,
+) -> dict:
+    try:
+        return build_evidence(setup, df4, df1, df15, btc)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}", "text": ""}
 
 
 def analyze_smc_symbol(
@@ -2637,4 +2651,5 @@ def analyze_smc_symbol(
     if isinstance(best_setup.raw_market_data, dict):
         best_setup.raw_market_data["forward_playbook"] = best_setup.forward_playbook
         best_setup.raw_market_data["flip_scenario"] = best_setup.flip_scenario
+        best_setup.raw_market_data["evidence"] = _safe_evidence(best_setup, df4, df1, df15, btc)
     return best_setup

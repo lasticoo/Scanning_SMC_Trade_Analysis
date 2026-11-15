@@ -244,6 +244,9 @@ def build_full_llm_smc_prompt(setup: Any, btc_ctx: Optional[dict] = None) -> str
         stage_info_line = (
             f"- [TEMUAN RULES & SKOR OBJEKTIF PYTHON] Skor Awal Python: {py_score:.0f}/100 | Rincian Komponen: {parts_txt}\n"
         )
+    ev_dict = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
+    ev_txt = str(ev_dict.get("text") or "").strip()
+    ev_block = f"\n{ev_txt}" if ev_txt else ""
 
     prompt = f"""Anda adalah HAKIM & KURATOR PENILAIAN AKHIR 3 Pilar Paten SMC/ICT Modern Crypto Futures (4H->1H->15M & Orderflow).
 Python bertugas sebagai tracker, penemu struktur objektif, dan pengukur geometri. Anda (API AI) yang memegang keputusan penilaian akhir (decision, status, smc_score, playbook).
@@ -261,7 +264,7 @@ Python bertugas sebagai tracker, penemu struktur objektif, dan pengukur geometri
 - OB1H: {obs_1h_txt} | FVG1H: {fvgs_1h_txt} | EQH1H[{eqh_1h}] EQL1H[{eql_1h}]
 [15M & ORDERFLOW] ATR15M: {fp(atr_15m)} | Struktur15M: {recent_events} | IDM: {idm_txt} | PinBar: {pin_txt}
 - OB15M: {obs_15_txt} | FVG15M: {fvgs_15_txt} | EQH15M[{eqh_15}] EQL15M[{eql_15}]
-- Orderflow: {of_txt} | Funding: {fund_pct:+.4f}%
+- Orderflow: {of_txt} | Funding: {fund_pct:+.4f}%{ev_block}
 
 [LEVEL & FIXED LIQUIDITY-PROTECTED SL (NO BEP)] Entry: {fp(plan_entry)}{sw_entry_str} (POI: {entry_zone} | {'Di POI' if at_poi else 'Menunggu Sentuhan'})
 - SL Tetap: {fp(sl)}{guard_str} | Checkpoint TP1: {fp(tp1)} | Target Utama TP2: {fp(tp2)} (RR 1:{rr:.1f}, WAJIB >= 1:3.0){tp3_str} | Tembok Lawan: {opp_txt} | Invalidasi: {invalidation}
