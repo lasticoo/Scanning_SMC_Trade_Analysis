@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as dt
+import json
 import math
 import os
 import sys
@@ -680,6 +681,81 @@ def results_to_df(results: list, scan_ts: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _clean_json_num(val, ndigits: int = 8):
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return round(f, ndigits)
+    except (TypeError, ValueError):
+        return None
+
+
+def append_setups_jsonl(
+    results: List[Setup],
+    scan_ts: str,
+    out_dir: str,
+    py_status_map: Optional[Dict[int, str]] = None,
+    filename: str = "setups_audit.jsonl",
+) -> str:
+    """
+    Mencatat satu baris JSON per setup (waktu, simbol, archetype, status Python,
+    status/skor LLM, level entry/SL/TP, dan evidence objektif + flags) agar dapat
+    disambungkan langsung dengan hasil win/lose dari tracker.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    jsonl_path = os.path.join(out_dir, filename)
+    with open(jsonl_path, "a", encoding="utf-8") as fh:
+        for r in results:
+            raw_md = getattr(r, "raw_market_data", {}) or {}
+            ev_raw = raw_md.get("evidence") if isinstance(raw_md.get("evidence"), dict) else {}
+            ev_clean = {k: v for k, v in ev_raw.items() if k != "text"}
+            py_st = (
+                py_status_map.get(id(r))
+                if isinstance(py_status_map, dict) and id(r) in py_status_map
+                else str(raw_md.get("python_status") or r.status)
+            )
+            ai_dec = str(getattr(r, "ai_decision", "") or "")
+            has_llm = ai_dec in ("APPROVED", "CONDITIONAL", "REJECTED")
+            rec = {
+                "scan_utc": scan_ts,
+                "signal_candle_utc": getattr(r, "candle_time", ""),
+                "last_closed_candle_utc": getattr(r, "last_candle", ""),
+                "tracker_key": f"{r.symbol}|{r.direction}|{getattr(r, 'candle_time', '')}",
+                "symbol": r.symbol,
+                "direction": r.direction,
+                "archetype": getattr(r, "archetype", ""),
+                "pattern": getattr(r, "pattern", ""),
+                "python_status": py_st,
+                "python_score": _clean_json_num(getattr(r, "python_score", r.score), 2),
+                "status": r.status,
+                "score": _clean_json_num(r.score, 2),
+                "llm_status": r.status if has_llm else None,
+                "llm_score": _clean_json_num(getattr(r, "ai_confidence", r.score), 2) if has_llm else None,
+                "ai_decision": ai_dec or None,
+                "ai_model": str(getattr(r, "ai_model", "") or "") or None,
+                "levels": {
+                    "market_price": _clean_json_num(getattr(r, "market_price", NAN)),
+                    "entry": _clean_json_num(r.entry),
+                    "limit_entry": _clean_json_num(getattr(r, "limit_entry", NAN)),
+                    "poi_low": _clean_json_num(getattr(r, "poi_low", NAN)),
+                    "poi_high": _clean_json_num(getattr(r, "poi_high", NAN)),
+                    "sl": _clean_json_num(r.sl),
+                    "tp1": _clean_json_num(r.tp1),
+                    "tp2": _clean_json_num(r.tp2),
+                    "tp3": _clean_json_num(getattr(r, "tp3", NAN)),
+                    "rr": _clean_json_num(r.rr, 2),
+                    "risk_pct": _clean_json_num(getattr(r, "risk_pct", NAN), 3),
+                },
+                "evidence": ev_clean,
+                "flags": ev_raw.get("flags", []) if isinstance(ev_raw, dict) else [],
+            }
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return jsonl_path
+
+
 # =====================================================================
 #  TELEGRAM NOTIFIER
 # =====================================================================
@@ -952,6 +1028,8 @@ def run_scan(cfg: Config, args, sent: set) -> list:
         for s in results:
             size_position(s, args.equity, args.risk_pct, args.fee_pct)
 
+    py_status_map = {id(s): s.status for s in results}
+
     if cfg.ai_audit and results:
         _print_instant_python_preview(results, time.monotonic() - t0)
         try:
@@ -1003,7 +1081,8 @@ def run_scan(cfg: Config, args, sent: set) -> list:
     csv_path = os.path.join(args.out, f"scan_{stamp}.csv")
     if results:
         results_to_df(results, scan_ts).sort_values("score", ascending=False).to_csv(csv_path, index=False)
-        print(f"\nHasil disimpan: {csv_path}")
+        jsonl_path = append_setups_jsonl(results, scan_ts, args.out, py_status_map=py_status_map)
+        print(f"\nHasil disimpan: {csv_path} (JSONL audit: {jsonl_path})")
     if radar_hits and cfg.radar_mode:
         radar_csv = os.path.join(args.out, f"radar_{stamp}.csv")
         pd.DataFrame([vars(rh) for rh in radar_hits]).to_csv(radar_csv, index=False)
