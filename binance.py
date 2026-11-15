@@ -35,6 +35,7 @@ import math
 import os
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
@@ -381,10 +382,12 @@ def build_report(
         f"BINANCE USDT-M FUTURES 3-PILAR PATEN SMC/ICT (REVERSAL WATCH + PRE-TAP LIMIT + SNIPER >= 75){mode_tag}   |   Scan: {scan_ts} UTC{spd}"
     )
     out.append("=" * 144)
+    err_types_map = stats.get("error_types") or {}
+    err_detail = f": {', '.join(f'{k}={v}' for k, v in err_types_map.items())}" if err_types_map else ""
     out.append(
         f"Universe: {stats['total']} kontrak USDT-perp aktif -> {stats['liquid']} lolos likuiditas "
         f"(vol24 >= {cfg.min_vol_usdt / 1e6:.0f}M USDT, spread <= {cfg.max_spread_bps:g} bps) -> {stats['scanned']} dianalisa "
-        f"({stats['errors']} gagal data)"
+        f"({stats['errors']} gagal data{err_detail})"
     )
     if btc:
         out.append(
@@ -746,6 +749,26 @@ def _compute_symbol_radar(
     return scan_live_zone_radar(sym, df15, ctx4, ctx1, map4, map1, map15, cfg, existing_setup=st)
 
 
+def _cpu_bundle(
+    sym: str,
+    df4: pd.DataFrame,
+    df1: pd.DataFrame,
+    df15: pd.DataFrame,
+    meta: dict,
+    cfg: Config,
+    btc: Optional[dict],
+    deriv: Optional[dict] = None,
+    st_prev: Optional[Setup] = None,
+) -> Tuple[dict, dict, Optional[Setup], Optional[ZoneRadarHit]]:
+    ctx4 = htf_context(df4, cfg.htf_piv)
+    ctx1 = htf_context(df1, cfg.htf_piv)
+    st = _eval_strategy(sym, df4, df1, df15, ctx4, ctx1, meta, cfg, deriv=deriv, btc=btc)
+    if st is None and st_prev is not None:
+        st = st_prev
+    rh = _compute_symbol_radar(sym, df4, df1, df15, ctx4, ctx1, cfg, st)
+    return ctx4, ctx1, st, rh
+
+
 async def _scan_universe_async(cfg: Config, only: Optional[List[str]]) -> Tuple[list, List[ZoneRadarHit], Optional[dict], dict, int]:
     async with AsyncBinance(concurrency=max(4, cfg.workers)) as api:
         server_ms = await api.server_time()
@@ -764,12 +787,13 @@ async def _scan_universe_async(cfg: Config, only: Optional[List[str]]) -> Tuple[
             if len(b4) >= 60 and len(b1) >= 60:
                 btc = {"4h": htf_context(b4, cfg.htf_piv), "1h": htf_context(b1, cfg.htf_piv)}
         except Exception as e:
-            print(f"  konteks BTC gagal diambil: {e}", file=sys.stderr)
+            print(f"  konteks BTC gagal diambil ({type(e).__name__}): {e}", file=sys.stderr)
 
         cached_bundles: Dict[str, tuple] = {}
         radar_map: Dict[str, ZoneRadarHit] = {}
         results: List[Setup] = []
         errors = 0
+        error_types: Counter = Counter()
 
         async def worker_one(sym: str, meta: dict) -> Optional[Setup]:
             nonlocal errors
@@ -777,18 +801,19 @@ async def _scan_universe_async(cfg: Config, only: Optional[List[str]]) -> Tuple[
                 df4, df1, df15 = await api.fetch_symbol_klines(sym, cfg, server_ms)
                 if len(df4) < 60 or len(df1) < 60 or len(df15) < cfg.min_bars_15m:
                     return None
-                ctx4 = htf_context(df4, cfg.htf_piv)
-                ctx1 = htf_context(df1, cfg.htf_piv)
-                st = _eval_strategy(sym, df4, df1, df15, ctx4, ctx1, meta, cfg, btc=btc)
+                ctx4, ctx1, st, rh = await asyncio.to_thread(
+                    _cpu_bundle, sym, df4, df1, df15, meta, cfg, btc
+                )
                 if st is not None:
                     cached_bundles[sym] = (df4, df1, df15, ctx4, ctx1, meta)
-                rh = _compute_symbol_radar(sym, df4, df1, df15, ctx4, ctx1, cfg, st)
                 if rh is not None:
                     radar_map[sym] = rh
                 return st
             except Exception as e:
                 errors += 1
-                print(f"  [{sym}] gagal: {e}", file=sys.stderr)
+                ename = type(e).__name__
+                error_types[ename] += 1
+                print(f"  [{sym}] gagal ({ename}): {e}", file=sys.stderr)
                 return None
 
         raw_setups = await asyncio.gather(*(worker_one(sym, meta) for sym, meta in universe))
@@ -798,9 +823,27 @@ async def _scan_universe_async(cfg: Config, only: Optional[List[str]]) -> Tuple[
         if prelim and cfg.fetch_derivatives:
             print(f"  mengambil data Open Interest & Long/Short Ratio untuk {len(prelim)} kandidat ...", file=sys.stderr)
             deriv_map_list = await asyncio.gather(*(api.fetch_derivatives(s.symbol) for s in prelim))
-            for st_old, drv in zip(prelim, deriv_map_list):
-                df4, df1, df15, ctx4, ctx1, meta = cached_bundles[st_old.symbol]
-                st_new = _eval_strategy(st_old.symbol, df4, df1, df15, ctx4, ctx1, meta, cfg, deriv=drv, btc=btc)
+            pass2_out = await asyncio.gather(
+                *(
+                    asyncio.to_thread(
+                        _eval_strategy,
+                        st_old.symbol,
+                        *cached_bundles[st_old.symbol],
+                        cfg,
+                        drv,
+                        btc,
+                    )
+                    for st_old, drv in zip(prelim, deriv_map_list)
+                ),
+                return_exceptions=True,
+            )
+            for st_old, st_new in zip(prelim, pass2_out):
+                if isinstance(st_new, Exception):
+                    errors += 1
+                    ename = type(st_new).__name__
+                    error_types[ename] += 1
+                    print(f"  [{st_old.symbol}] gagal ({ename}): {st_new}", file=sys.stderr)
+                    continue
                 final_st = st_new if st_new is not None else st_old
                 results.append(final_st)
                 if final_st.symbol in radar_map:
@@ -809,7 +852,17 @@ async def _scan_universe_async(cfg: Config, only: Optional[List[str]]) -> Tuple[
         else:
             results = prelim
 
-        stats = {"total": total, "liquid": liquid, "scanned": len(universe) - errors, "errors": errors}
+        if error_types:
+            err_summary = ", ".join(f"{k}={v}" for k, v in error_types.most_common())
+            print(f"  ringkasan jenis error ({errors} total): {err_summary}", file=sys.stderr)
+
+        stats = {
+            "total": total,
+            "liquid": liquid,
+            "scanned": len(universe) - errors,
+            "errors": errors,
+            "error_types": dict(error_types),
+        }
         return results, list(radar_map.values()), btc, stats, server_ms
 
 
