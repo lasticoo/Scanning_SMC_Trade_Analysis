@@ -400,6 +400,7 @@ def _compute_trade_geometry(
     TP1/TP2 berbasis likuiditas 1H & pembatas Tembok 4H, serta Estimasi Durasi Posisi.
     """
     notes: List[str] = []
+    raw_poi_low, raw_poi_high = min(poi_low, poi_high), max(poi_low, poi_high)
     max_zone_w = min(0.80 * atr_1h, 0.035 * cur_p)
     poi_low, poi_high = _refine_zone_bounds(poi_low, poi_high, d, cur_p, max_zone_w, 0.14 * atr_1h)
 
@@ -430,7 +431,7 @@ def _compute_trade_geometry(
         if not at_poi:
             notes.append(f"Harga saat ini ({fp(cur_p)}) sudah berjarak dari POI; skenario optimal menunggu Limit Retest di {fp(poi_low)} - {fp(poi_high)}.")
 
-    # --- STOP LOSS PROPORSIONAL ("ZOOM-OUT CHECK" BERJANGKAR ATR 1H & RANGE 1H) ---
+    # --- STOP LOSS BERBASIS TAMENG LIKUIDITAS ("LIQUIDITY-PROTECTED SL" + "ZOOM-OUT CHECK" ATR 1H) ---
     w_span = max(w_high - w_low, 2.5 * atr_1h)
     min_pct = cfg.min_sl_pct_major if symbol in MAJOR_SYMBOLS else cfg.min_sl_pct_alt
     raw_min_sl = max(
@@ -440,114 +441,207 @@ def _compute_trade_geometry(
     )
     min_sl_dist = min(raw_min_sl, 0.038 * plan_entry)
     max_sl_dist = min(
-        0.055 * plan_entry,
+        0.056 * plan_entry,
         max(min_sl_dist * 1.30, min(cfg.max_sl_atr_1h * atr_1h, cfg.max_sl_range_1h * max(w_span, 4.0 * atr_1h))),
     )
 
+    liq_guard_info = ""
+    sweep_entry_lvl = NAN
+
     if d == 1:
         local_swing_low = float(np.min(l_arr[-12:]))
-        use_local = archetype != "PRE_REACTION" and abs(plan_entry - local_swing_low) <= 1.8 * atr_1h
+        use_local = abs(plan_entry - local_swing_low) <= 1.8 * atr_1h
         anchor_low = min(poi_low, local_swing_low) if use_local else poi_low
-        if htf_poi and abs(plan_entry - htf_poi["bot"]) <= 1.9 * atr_1h:
+        if htf_poi and abs(plan_entry - htf_poi["bot"]) <= 2.0 * atr_1h:
             anchor_low = min(anchor_low, htf_poi["bot"])
+
+        # Deteksi kolam likuiditas (EQL 1H/15M, Swing Low 1H/15M, atau Wick 4H/1H) tepat di belakang POI
+        liq_cands_l: List[Tuple[float, str]] = []
+        if map1:
+            for eq_l in map1.get("eql", []):
+                liq_cands_l.append((float(eq_l), "EQL 1H"))
+            for sw_l in map1.get("lows", [])[-4:]:
+                liq_cands_l.append((float(sw_l["price"]), "Swing Low 1H"))
+        for eq_l15 in map15.get("eql", []):
+            liq_cands_l.append((float(eq_l15), "EQL 15M"))
+        for sw_l15 in map15.get("lows", [])[-5:]:
+            liq_cands_l.append((float(sw_l15["price"]), "Swing Low 15M"))
+        if htf_poi:
+            liq_cands_l.append((float(htf_poi["bot"]), f"Wick {htf_poi.get('tf', 'HTF')} OB"))
+        if raw_poi_low < poi_low:
+            liq_cands_l.append((float(raw_poi_low), "Ujung Bawah Zona HTF"))
+        if wall_demand_4h:
+            liq_cands_l.append((float(wall_demand_4h["bot"]), "Tembok Demand 4H"))
+
+        valid_liq_l = [
+            (lvl, lbl) for lvl, lbl in liq_cands_l
+            if (plan_entry - 1.60 * atr_1h) <= lvl <= (poi_low + 0.04 * atr_1h)
+        ]
+        if valid_liq_l:
+            valid_liq_l.sort(key=lambda x: x[0])  # ambil kolam likuiditas terdalam yang masih dalam jangkauan wajar
+            liq_lvl, liq_lbl = valid_liq_l[0]
+            anchor_low = min(anchor_low, liq_lvl)
+            max_sl_dist = max(max_sl_dist, min(0.060 * plan_entry, 2.50 * atr_1h))
+            if liq_lvl < poi_low - 0.02 * atr_1h:
+                sweep_entry_lvl = liq_lvl
+            liq_guard_info = f"SL diamankan di balik {liq_lbl} ({fp(liq_lvl)}) — tahan Judas Swing"
+
         sl_struct = anchor_low - cfg.sl_buffer * atr_1h
         raw_dist = max(0.0, plan_entry - sl_struct)
         final_sl_dist = clamp(raw_dist, min_sl_dist, max_sl_dist)
-        sl = min(plan_entry - final_sl_dist, poi_low - 0.08 * cur_atr)
+        sl = min(plan_entry - final_sl_dist, anchor_low - 0.10 * cur_atr)
     else:
         local_swing_high = float(np.max(h_arr[-12:]))
-        use_local = archetype != "PRE_REACTION" and abs(local_swing_high - plan_entry) <= 1.8 * atr_1h
+        use_local = abs(local_swing_high - plan_entry) <= 1.8 * atr_1h
         anchor_high = max(poi_high, local_swing_high) if use_local else poi_high
-        if htf_poi and abs(htf_poi["top"] - plan_entry) <= 1.9 * atr_1h:
+        if htf_poi and abs(htf_poi["top"] - plan_entry) <= 2.0 * atr_1h:
             anchor_high = max(anchor_high, htf_poi["top"])
+
+        # Deteksi kolam likuiditas (EQH 1H/15M, Swing High 1H/15M, atau Wick 4H/1H) tepat di belakang POI
+        liq_cands_h: List[Tuple[float, str]] = []
+        if map1:
+            for eq_h in map1.get("eqh", []):
+                liq_cands_h.append((float(eq_h), "EQH 1H"))
+            for sw_h in map1.get("highs", [])[-4:]:
+                liq_cands_h.append((float(sw_h["price"]), "Swing High 1H"))
+        for eq_h15 in map15.get("eqh", []):
+            liq_cands_h.append((float(eq_h15), "EQH 15M"))
+        for sw_h15 in map15.get("highs", [])[-5:]:
+            liq_cands_h.append((float(sw_h15["price"]), "Swing High 15M"))
+        if htf_poi:
+            liq_cands_h.append((float(htf_poi["top"]), f"Wick {htf_poi.get('tf', 'HTF')} OB"))
+        if raw_poi_high > poi_high:
+            liq_cands_h.append((float(raw_poi_high), "Ujung Atas Zona HTF"))
+        if wall_supply_4h:
+            liq_cands_h.append((float(wall_supply_4h["top"]), "Tembok Supply 4H"))
+
+        valid_liq_h = [
+            (lvl, lbl) for lvl, lbl in liq_cands_h
+            if (poi_high - 0.04 * atr_1h) <= lvl <= (plan_entry + 1.60 * atr_1h)
+        ]
+        if valid_liq_h:
+            valid_liq_h.sort(key=lambda x: -x[0])  # ambil kolam likuiditas tertinggi yang masih dalam jangkauan wajar
+            liq_lvl, liq_lbl = valid_liq_h[0]
+            anchor_high = max(anchor_high, liq_lvl)
+            max_sl_dist = max(max_sl_dist, min(0.060 * plan_entry, 2.50 * atr_1h))
+            if liq_lvl > poi_high + 0.02 * atr_1h:
+                sweep_entry_lvl = liq_lvl
+            liq_guard_info = f"SL diamankan di balik {liq_lbl} ({fp(liq_lvl)}) — tahan Judas Swing"
+
         sl_struct = anchor_high + cfg.sl_buffer * atr_1h
         raw_dist = max(0.0, sl_struct - plan_entry)
         final_sl_dist = clamp(raw_dist, min_sl_dist, max_sl_dist)
-        sl = max(plan_entry + final_sl_dist, poi_high + 0.08 * cur_atr)
+        sl = max(plan_entry + final_sl_dist, anchor_high + 0.10 * cur_atr)
 
     risk = max(abs(plan_entry - sl), 1e-12)
     sl_atr_1h_ratio = risk / max(atr_1h, 1e-12)
+    if not liq_guard_info:
+        liq_guard_info = f"SL Struktural 1H ({sl_atr_1h_ratio:.2f}x ATR 1H)"
 
-    # --- TARGET TP1 & TP2 + BATAS DURASI POSISI ---
+    # --- TARGET TP1 (CHECKPOINT), TP2 (TARGET UTAMA WAJIB >= 1:3.0), & TP3 (MACRO RUNNER 4.5R - 8R+) ---
     vel_factor = 0.50 if (cur_rv >= 1.4 and htf_pts >= 14.0) else 0.43
     hourly_vel = max(vel_factor * atr_1h, 1e-12)
-    eff_max_hold = min(cfg.max_hold_hours, 28.0) if archetype == "HTF_REVERSAL" else cfg.max_hold_hours
-    max_reach_dist = eff_max_hold * hourly_vel
+    eff_max_hold = max(cfg.max_hold_hours, 42.0)
+    max_reach_dist = max(eff_max_hold * hourly_vel, 4.8 * risk)
+    target_min_rr = max(float(getattr(cfg, "min_rr", 3.0)), 3.0)
 
     if d == 1:
         wall_cap = None
-        if wall_supply_4h and wall_supply_4h["bot"] > plan_entry + 0.25 * atr_1h:
-            wall_cap = max(plan_entry + 0.05 * atr_1h, wall_supply_4h["bot"] - 0.10 * atr_1h)
+        if wall_supply_4h and wall_supply_4h.get("fresh", True) and wall_supply_4h["bot"] > plan_entry + 0.50 * atr_1h:
+            wall_cap = max(plan_entry + 0.10 * atr_1h, wall_supply_4h["bot"] - 0.08 * atr_1h)
 
         cands_tp: List[float] = [w_eq, w_high]
         if map1:
             cands_tp.extend(map1["eqh"])
-            cands_tp.extend([s["price"] for s in map1["highs"][-6:]])
+            cands_tp.extend([s["price"] for s in map1["highs"][-8:]])
             cands_tp.extend([z["bot"] for z in map1["bear_obs"] if z["bot"] > plan_entry])
             cands_tp.extend([z["bot"] for z in map1["fvgs"] if z["dir"] == -1 and z["bot"] > plan_entry])
         cands_tp.extend(map15["eqh"])
+        if wall_supply_4h and wall_supply_4h["bot"] > plan_entry:
+            cands_tp.append(wall_supply_4h["bot"] - 0.05 * atr_1h)
+            cands_tp.append(wall_supply_4h["top"])
         if r4_hi > plan_entry:
             cands_tp.append(r4_hi)
 
-        min_r_tp2 = 1.95 if archetype == "HTF_REVERSAL" else 1.80
-        valid_tp2 = sorted([x for x in cands_tp if x >= plan_entry + min_r_tp2 * risk and x <= plan_entry + max_reach_dist])
+        valid_tp2 = sorted([x for x in cands_tp if x >= plan_entry + target_min_rr * risk and x <= plan_entry + max_reach_dist])
         if valid_tp2:
-            ideal_tp2 = [x for x in valid_tp2 if x >= plan_entry + 2.1 * risk]
-            tp2 = ideal_tp2[0] if ideal_tp2 else valid_tp2[-1]
+            sweet_tp2 = [x for x in valid_tp2 if x <= plan_entry + 4.8 * risk]
+            tp2 = sweet_tp2[0] if sweet_tp2 else min(valid_tp2[0], plan_entry + 4.5 * risk)
         else:
-            tp2 = plan_entry + min((2.5 if archetype == "HTF_REVERSAL" else 2.8) * risk, max_reach_dist)
+            tp2 = plan_entry + min(max(target_min_rr + 0.2, 3.2) * risk, max_reach_dist)
 
         if wall_cap is not None and tp2 > wall_cap:
             tp2 = wall_cap
-            notes.append(f"TP2 dibatasi di bawah Tembok Supply 4H ({fp(wall_supply_4h['bot'])}) agar realistis tanpa tertahan lama.")
+            notes.append(f"Target dibatasi di bawah Tembok Supply 4H Segar ({fp(wall_supply_4h['bot'])}).")
 
-        # Pada HTF_REVERSAL utamakan Equilibrium 1H sebagai TP1 cepat jika memberikan >= 1.10R
-        if archetype == "HTF_REVERSAL" and (plan_entry + 1.10 * risk <= w_eq <= plan_entry + 0.72 * max(tp2 - plan_entry, 0)):
+        # TP1 sebagai Checkpoint Struktur 1H (~1.5R - 2.1R) TANPA menggeser SL ke BEP
+        if archetype == "HTF_REVERSAL" and (plan_entry + 1.40 * risk <= w_eq <= plan_entry + 0.68 * max(tp2 - plan_entry, 0)):
             tp1 = w_eq
         else:
-            valid_tp1 = sorted([x for x in cands_tp if plan_entry + 1.15 * risk <= x <= plan_entry + 0.68 * max(tp2 - plan_entry, 0)])
-            tp1 = valid_tp1[0] if valid_tp1 else (plan_entry + 0.5 * (tp2 - plan_entry))
+            valid_tp1 = sorted([x for x in cands_tp if plan_entry + 1.50 * risk <= x <= plan_entry + 0.68 * max(tp2 - plan_entry, 0)])
+            tp1 = valid_tp1[0] if valid_tp1 else (plan_entry + 0.55 * (tp2 - plan_entry))
         opp_lvl = wall_supply_4h["bot"] if wall_supply_4h else w_high
+
+        # Target TP3 (Macro Runner 4.5R - 8R+) menuju ujung Dealing Range 4H / 1H High
+        runner_cands = [x for x in cands_tp + [r4_hi, w_high] if x >= max(tp2 + 1.2 * risk, plan_entry + 4.5 * risk)]
+        if runner_cands:
+            tp3 = min(max(runner_cands), plan_entry + 8.0 * risk)
+            if tp3 < tp2 + 1.0 * risk:
+                tp3 = max(tp2 + 1.5 * risk, plan_entry + 4.8 * risk)
+        else:
+            tp3 = max(tp2 + 1.5 * risk, plan_entry + 4.8 * risk)
 
     else:
         wall_cap = None
-        if wall_demand_4h and wall_demand_4h["top"] < plan_entry - 0.25 * atr_1h:
-            wall_cap = min(plan_entry - 0.05 * atr_1h, wall_demand_4h["top"] + 0.10 * atr_1h)
+        if wall_demand_4h and wall_demand_4h.get("fresh", True) and wall_demand_4h["top"] < plan_entry - 0.50 * atr_1h:
+            wall_cap = min(plan_entry - 0.10 * atr_1h, wall_demand_4h["top"] + 0.08 * atr_1h)
 
         cands_tp = [w_eq, w_low]
         if map1:
             cands_tp.extend(map1["eql"])
-            cands_tp.extend([s["price"] for s in map1["lows"][-6:]])
+            cands_tp.extend([s["price"] for s in map1["lows"][-8:]])
             cands_tp.extend([z["top"] for z in map1["bull_obs"] if z["top"] < plan_entry])
             cands_tp.extend([z["top"] for z in map1["fvgs"] if z["dir"] == 1 and z["top"] < plan_entry])
         cands_tp.extend(map15["eql"])
+        if wall_demand_4h and wall_demand_4h["top"] < plan_entry:
+            cands_tp.append(wall_demand_4h["top"] + 0.05 * atr_1h)
+            cands_tp.append(wall_demand_4h["bot"])
         if r4_lo < plan_entry:
             cands_tp.append(r4_lo)
 
-        min_r_tp2 = 1.95 if archetype == "HTF_REVERSAL" else 1.80
-        valid_tp2 = sorted([x for x in cands_tp if x <= plan_entry - min_r_tp2 * risk and x >= plan_entry - max_reach_dist], reverse=True)
+        valid_tp2 = sorted([x for x in cands_tp if x <= plan_entry - target_min_rr * risk and x >= plan_entry - max_reach_dist], reverse=True)
         if valid_tp2:
-            ideal_tp2 = [x for x in valid_tp2 if x <= plan_entry - 2.1 * risk]
-            tp2 = ideal_tp2[0] if ideal_tp2 else valid_tp2[-1]
+            sweet_tp2 = [x for x in valid_tp2 if x >= plan_entry - 4.8 * risk]
+            tp2 = sweet_tp2[0] if sweet_tp2 else max(valid_tp2[0], plan_entry - 4.5 * risk)
         else:
-            tp2 = plan_entry - min((2.5 if archetype == "HTF_REVERSAL" else 2.8) * risk, max_reach_dist)
+            tp2 = plan_entry - min(max(target_min_rr + 0.2, 3.2) * risk, max_reach_dist)
 
         if wall_cap is not None and tp2 < wall_cap:
             tp2 = wall_cap
-            notes.append(f"TP2 dibatasi di atas Tembok Demand 4H ({fp(wall_demand_4h['top'])}) agar posisi tidak tertahan terlalu lama.")
+            notes.append(f"Target dibatasi di atas Tembok Demand 4H Segar ({fp(wall_demand_4h['top'])}).")
 
-        if archetype == "HTF_REVERSAL" and (plan_entry - 0.72 * max(plan_entry - tp2, 0) <= w_eq <= plan_entry - 1.10 * risk):
+        if archetype == "HTF_REVERSAL" and (plan_entry - 0.68 * max(plan_entry - tp2, 0) <= w_eq <= plan_entry - 1.40 * risk):
             tp1 = w_eq
         else:
             valid_tp1 = sorted(
-                [x for x in cands_tp if plan_entry - 0.68 * max(plan_entry - tp2, 0) <= x <= plan_entry - 1.15 * risk],
+                [x for x in cands_tp if plan_entry - 0.68 * max(plan_entry - tp2, 0) <= x <= plan_entry - 1.50 * risk],
                 reverse=True,
             )
-            tp1 = valid_tp1[0] if valid_tp1 else (plan_entry - 0.5 * (plan_entry - tp2))
+            tp1 = valid_tp1[0] if valid_tp1 else (plan_entry - 0.55 * (plan_entry - tp2))
         opp_lvl = wall_demand_4h["top"] if wall_demand_4h else w_low
+
+        # Target TP3 (Macro Runner 4.5R - 8R+) menuju ujung Dealing Range 4H / 1H Low
+        runner_cands = [x for x in cands_tp + [r4_lo, w_low] if 0 < x <= min(tp2 - 1.2 * risk, plan_entry - 4.5 * risk)]
+        if runner_cands:
+            tp3 = max(min(runner_cands), max(plan_entry * 0.25, plan_entry - 8.0 * risk))
+            if tp3 > tp2 - 1.0 * risk:
+                tp3 = max(plan_entry * 0.25, min(tp2 - 1.5 * risk, plan_entry - 4.8 * risk))
+        else:
+            tp3 = max(plan_entry * 0.25, min(tp2 - 1.5 * risk, plan_entry - 4.8 * risk))
 
     rr = abs(tp2 - plan_entry) / risk
     rr_tp1 = abs(tp1 - plan_entry) / risk
+    rr_tp3 = abs(tp3 - plan_entry) / risk
     est_h1 = max(0.5, abs(tp1 - plan_entry) / hourly_vel)
     est_h2 = max(1.0, abs(tp2 - plan_entry) / hourly_vel)
     hold_label = _format_hold_duration(est_h1, est_h2)
@@ -570,10 +664,14 @@ def _compute_trade_geometry(
         "min_sl_dist": min_sl_dist,
         "max_sl_dist": max_sl_dist,
         "sl_atr_1h_ratio": sl_atr_1h_ratio,
+        "liq_guard_info": liq_guard_info,
+        "sweep_entry_lvl": sweep_entry_lvl,
         "tp1": tp1,
         "tp2": tp2,
+        "tp3": tp3,
         "rr": rr,
         "rr_tp1": rr_tp1,
+        "rr_tp3": rr_tp3,
         "opp_lvl": opp_lvl,
         "hourly_vel": hourly_vel,
         "est_h1": est_h1,
@@ -586,8 +684,9 @@ def _compute_trade_geometry(
 
 def populate_forward_playbook(s: Setup) -> None:
     """
-    Menyusun panduan taktis ke depan (Forward If-Then Playbook + Flip Scenario) secara spesifik
-    sesuai Variasi Setup (TREND_CONT, PRE_REACTION, HTF_REVERSAL, BREAKOUT) & karakter liar crypto.
+    Menyusun panduan taktis ke depan (Forward If-Then Playbook + Flip Scenario) sesuai gaya trader:
+    - Wajib R:R Minimal 1:3.0 (Target Utama TP2 >= 3.0R, Runner TP3 4.5R - 8.0R+).
+    - Set-and-Forget Fixed Structural SL di balik kolam likuiditas (PANTANG geser SL ke BEP agar tahan retest kripto).
     """
     is_long = s.direction == "LONG"
     opp_dir = "SHORT" if is_long else "LONG"
@@ -595,53 +694,59 @@ def populate_forward_playbook(s: Setup) -> None:
     ce_mid = (s.poi_low + s.poi_high) / 2.0 if (not math.isnan(s.poi_low) and not math.isnan(s.poi_high)) else s.entry
     dist_txt = f"{s.dist_to_poi_pct:.2f}%" if not math.isnan(s.dist_to_poi_pct) else "-"
     tap_txt = f"~{s.est_tap_hours:.1f} jam" if (not math.isnan(s.est_tap_hours) and s.est_tap_hours > 0) else "detik ini"
+    runner_txt = f" atau lanjut Runner ke TP3 {fp(s.tp3)} (RR 1:{s.rr_tp3:.1f})" if not math.isnan(s.tp3) and not math.isnan(s.rr_tp3) else ""
+    sw_ref_txt = (
+        f" [Batas Sweep Likuiditas: {fp(s.sweep_entry_lvl)} — SL tetap di {fp(s.sl)} di baliknya]"
+        if not math.isnan(s.sweep_entry_lvl)
+        else f" (SL Struktural Tetap: {fp(s.sl)})"
+    )
 
     if s.archetype == "PRE_REACTION":
         if s.exec_style == "LIMIT_PRE_TAP":
             s.forward_playbook = (
-                f"SEBELUM BEREAKSI ({s.approach_style}): Harga berjarak {dist_txt} menuju zona segar [{s.entry_zone}] (est. jemput {tap_txt}). "
-                f"Langkah Utama: Pasang Limit {s.direction} di {fp(s.entry)} (atau split 50% bibir {fp(prox_edge)} & 50% CE {fp(ce_mid)}), "
-                f"SL {fp(s.sl)}; saat TP1 {fp(s.tp1)} tersentuh wajib ambil 50% & geser SL ke BEP ({s.est_hold_label})."
+                f"SEBELUM BEREAKSI ({s.approach_style}): Harga berjarak {dist_txt} menuju OB segar [{s.entry_zone}] (est. jemput {tap_txt}). "
+                f"Langkah Utama: Pasang Limit {s.direction} di {fp(s.entry)} (atau bagi entry di CE {fp(ce_mid)} & area sweep {fp(s.sweep_entry_lvl if not math.isnan(s.sweep_entry_lvl) else prox_edge)}){sw_ref_txt}; "
+                f"pertahankan SL tetap di {fp(s.sl)} (JANGAN geser SL ke BEP saat retest) dan tahan penuh menuju Target Utama >=1:3 di TP2 {fp(s.tp2)} (RR 1:{s.rr:.1f}){runner_txt}."
             )
         else:
             s.forward_playbook = (
                 f"PENDEKATAN LIAR KRIPTO ({s.approach_style}): Harga mendekati [{s.entry_zone}] (jarak {dist_txt}) dengan momentum tajam. "
-                f"Langkah Utama: JANGAN pasang limit buta di bibir {fp(prox_edge)} (rawan tusukan stop-hunt wick); tunggu harga menusuk ke "
-                f"50% CE {fp(ce_mid)} + konfirmasi close 15M memantul (PinBar/CISD) baru entry {s.direction} dengan SL {fp(s.sl)}."
+                f"Langkah Utama: Tunggu tusukan Judas Swing ke CE {fp(ce_mid)} / likuiditas {fp(s.sweep_entry_lvl if not math.isnan(s.sweep_entry_lvl) else (s.poi_low if is_long else s.poi_high))} "
+                f"+ close 15M memantul (PinBar/CISD) baru entry {s.direction}{sw_ref_txt}; tahan SL tetap tanpa geser BEP menuju TP2 {fp(s.tp2)} (RR 1:{s.rr:.1f}){runner_txt}."
             )
         s.flip_scenario = (
             f"Antisipasi Jebol (Breaker Flip): Jika candle 15M/1H close impulsif ber-volume menembus SL {fp(s.sl)} tanpa pantulan, "
-            f"batalkan {s.direction} — zona [{s.entry_zone}] berubah menjadi Breaker Block untuk cari retest {opp_dir}."
+            f"terima risiko 1R secara disiplin — zona [{s.entry_zone}] berubah menjadi Breaker Block untuk cari retest {opp_dir}."
         )
 
     elif s.archetype == "HTF_REVERSAL":
         if s.status == "ENTRY READY":
             s.forward_playbook = (
                 f"REVERSAL TERKONFIRMASI DI AREA KUNCI ({s.zone_badge}): Likuiditas sudah tersapu & struktur mikro berbalik. "
-                f"Langkah Utama: Eksekusi {s.direction} di dekat {fp(s.entry)} (SL {fp(s.sl)}), wajib amankan 50% cepat di TP1 Equilibrium 1H "
-                f"({fp(s.tp1)}) + geser SL ke BEP, sisanya kawal ke TP2 {fp(s.tp2)}."
+                f"Langkah Utama: Eksekusi {s.direction} di dekat {fp(s.entry)}{sw_ref_txt}; pertahankan SL tetap di {fp(s.sl)} "
+                f"(pantang geser SL ke BEP agar tidak tersapu retest) dan kawal penuh ke Target Utama TP2 {fp(s.tp2)} (RR 1:{s.rr:.1f}){runner_txt} [Checkpoint struktur: {fp(s.tp1)}]."
             )
         else:
             s.forward_playbook = (
                 f"POTENSI KETERBALIKAN TREN DI AREA PENTING [{s.entry_zone}] (Jarak {dist_txt}): "
-                f"Langkah Utama: Hentikan kejar tren {opp_dir} di depan tembok ini! Tunggu Judas Swing / sapuan likuiditas + "
-                f"konfirmasi close 15M CHOCH/CISD di dalam [{s.entry_zone}] sebelum eksekusi {s.direction} menuju EQ 1H {fp(s.tp1)}."
+                f"Langkah Utama: Tunggu sapuan likuiditas (Judas Swing){sw_ref_txt} + konfirmasi close 15M CHOCH/CISD di dalam [{s.entry_zone}] "
+                f"sebelum eksekusi {s.direction}; tahan SL tetap di {fp(s.sl)} (tanpa geser BEP) menuju Target Utama TP2 {fp(s.tp2)} (RR 1:{s.rr:.1f}){runner_txt}."
             )
         s.flip_scenario = (
-            f"Skenario Lanjut Tren (Batal Reversal): Jika harga tidak bereaksi dan close candle 1H solid menembus {fp(s.sl)} "
+            f"Skenario Lanjut Tren (Batal Reversal): Jika harga tidak bereaksi dan close candle 1H solid menembus SL {fp(s.sl)} "
             f"disertai lonjakan OI/Volume, tembok mayor resmi jebol — batalkan reversal & ikuti kelanjutan tren {opp_dir} saat retest."
         )
 
     elif s.archetype == "BREAKOUT":
         if s.status == "ENTRY READY":
             s.forward_playbook = (
-                f"BREAKOUT AKTIF: Eksekusi {s.direction} dekat {fp(s.entry)} (SL {fp(s.sl)}), amankan 50% di TP1 {fp(s.tp1)} -> SL ke BEP, "
-                f"target penuh TP2 {fp(s.tp2)} ({s.est_hold_label})."
+                f"BREAKOUT AKTIF: Eksekusi {s.direction} dekat {fp(s.entry)} (SL tetap di {fp(s.sl)} tanpa geser BEP), "
+                f"tahan menuju Target Utama TP2 {fp(s.tp2)} (RR 1:{s.rr:.1f}){runner_txt}."
             )
         else:
             s.forward_playbook = (
                 f"PANTAU BREAKOUT/RETEST [{s.entry_zone}]: Tunggu close 15M valid ber-volume >= 1.5x rata-rata atau retest bersih di {fp(s.level)} "
-                f"dengan SL {fp(s.sl)}."
+                f"dengan SL tetap di {fp(s.sl)}."
             )
         s.flip_scenario = (
             f"Antisipasi Fakeout/Deviation: Jika breakout gagal dan close 15M masuk kembali menembus {fp(s.sl)}, waspadai sapuan likuiditas "
@@ -649,27 +754,21 @@ def populate_forward_playbook(s: Setup) -> None:
         )
 
     else:
-        # TREND_CONT (Post-Reaction Follow Trend)
+        # PILAR 3: SMC_SNIPER (Post-Sweep + CHOCH di POI)
         if s.status == "ENTRY READY":
             s.forward_playbook = (
-                f"FOLLOW-TREND TERKONFIRMASI ({s.zone_badge}): Reaksi di POI [{s.entry_zone}] valid searah struktur. "
-                f"Langkah Utama: Eksekusi {s.direction} di area {fp(s.entry)} (SL proporsional 1H {fp(s.sl)}), ambil 50% di TP1 {fp(s.tp1)} "
-                f"& geser SL ke BEP, sisanya kawal ke TP2 {fp(s.tp2)} ({s.est_hold_label})."
-            )
-        elif s.zone_state in ("IN_POI_TESTING", "FIRST_TOUCH_NOW", "SWEEP_IN_POI"):
-            s.forward_playbook = (
-                f"SEDANG MENGUJI POI [{s.entry_zone}]: Harga sudah di dalam zona namun candle belum menutup searah pantulan. "
-                f"Langkah Utama: Tunggu candle 15M close hijau/merah (PinBar/CISD) di atas/bawah bibir zona baru entry {s.direction} (SL {fp(s.sl)})."
+                f"SMC SNIPER TERKONFIRMASI ({s.zone_badge}): Likuiditas sudah disapu + CHOCH/CISD valid di POI [{s.entry_zone}]. "
+                f"Langkah Utama: Eksekusi {s.direction} di area {fp(s.entry)}{sw_ref_txt}, pertahankan SL tetap di {fp(s.sl)} "
+                f"(JANGAN geser SL ke BEP saat retest) dan tahan penuh menuju Target Utama TP2 {fp(s.tp2)} (RR 1:{s.rr:.1f}){runner_txt}."
             )
         else:
             s.forward_playbook = (
-                f"SUDAH BEREAKSI ({s.zone_badge}): Struktur {s.direction} valid namun harga sudah berjarak {dist_txt} dari POI [{s.entry_zone}]. "
-                f"Langkah Utama: Jangan FOMO kejar harga pasar; pasang Limit Retest di {fp(s.limit_entry)} (SL {fp(s.sl)}) atau batalkan order "
-                f"jika harga mencapai TP1 {fp(s.tp1)} lebih dulu tanpa jemput limit."
+                f"PANTAUAN SMC SNIPER ({s.zone_badge}): Struktur Sweep+CHOCH {s.direction} sudah terbentuk di [{s.entry_zone}]{sw_ref_txt}. "
+                f"Langkah Utama: Tunggu harga jemput/menutup konfirmasi di {fp(s.limit_entry)}, pasang SL tetap di {fp(s.sl)} (tanpa geser BEP), dan bidik Target Utama TP2 {fp(s.tp2)} (RR 1:{s.rr:.1f}){runner_txt}."
             )
         s.flip_scenario = (
-            f"Skenario Invalidasi / Flip: Jika retest gagal dan candle 15M/1H close menembus SL {fp(s.sl)}, struktur tren patah "
-            f"(CHOCH ke {opp_dir}) — cut loss disiplin & pantau peluang balik arah {opp_dir}."
+            f"Skenario Invalidasi / Flip: Jika candle 15M/1H close menembus SL {fp(s.sl)}, struktur tren patah "
+            f"(CHOCH ke {opp_dir}) — terima risiko 1R disiplin & pantau peluang balik arah {opp_dir}."
         )
 
 
@@ -934,6 +1033,10 @@ def analyze_smc_symbol(
         p_lo, p_hi = geom["poi_low"], geom["poi_high"]
         plan_e = geom["plan_entry"]
         sl_p, tp1_p, tp2_p = geom["sl"], geom["tp1"], geom["tp2"]
+        tp3_p = geom.get("tp3", tp2_p)
+        rr_tp3_val = geom.get("rr_tp3", geom["rr"])
+        liq_guard_s = geom.get("liq_guard_info", "")
+        sw_entry_lvl = geom.get("sweep_entry_lvl", NAN)
         zone_s = f"{fp(p_lo)} - {fp(p_hi)}"
         conf_s = ", ".join(confluences[:3])
         conf_full = f"[{archetype_lbl} | {zone_pos_lbl} | Est. {geom['hold_label']}]: " + ", ".join(confluences)
@@ -960,6 +1063,10 @@ def analyze_smc_symbol(
             "poi_label": poi_lbl,
             "min_sl_dist": geom["min_sl_dist"],
             "max_sl_dist": geom["max_sl_dist"],
+            "tp3": tp3_p,
+            "rr_tp3": rr_tp3_val,
+            "liq_guard_info": liq_guard_s,
+            "sweep_entry_lvl": sw_entry_lvl,
             # Lapis 4H
             "range_4h_low": r4_lo,
             "range_4h_high": r4_hi,
@@ -1048,11 +1155,16 @@ def analyze_smc_symbol(
             sl=float(sl_p),
             tp1=float(tp1_p),
             tp2=float(tp2_p),
+            tp3=float(tp3_p),
             rr=float(geom["rr"]),
             rr_tp1=float(geom["rr_tp1"]),
+            rr_tp3=float(rr_tp3_val),
             risk_pct=geom["risk"] / plan_e * 100.0,
             tp1_pct=abs(tp1_p - plan_e) / plan_e * 100.0,
             tp2_pct=abs(tp2_p - plan_e) / plan_e * 100.0,
+            tp3_pct=abs(tp3_p - plan_e) / plan_e * 100.0,
+            liq_guard_info=liq_guard_s,
+            sweep_entry_lvl=float(sw_entry_lvl) if not math.isnan(sw_entry_lvl) else NAN,
             score=float(tot_score),
             python_score=float(tot_score),
             parts=parts,
@@ -1301,7 +1413,7 @@ def analyze_smc_symbol(
                 pat_c, kind_c = "SMC MTF Supply Setup", "SMC_SUPPLY"
 
         rr_c = geom_c["rr"]
-        rr_pts_c = 10.0 if rr_c >= 2.8 else (8.5 if rr_c >= 2.3 else (6.5 if rr_c >= 2.0 else (2.5 if rr_c >= 1.5 else 0.0)))
+        rr_pts_c = 10.0 if rr_c >= 3.5 else (8.5 if rr_c >= 3.0 else (4.0 if rr_c >= 2.5 else 0.0))
         liq_pts_c = liquidity_score(meta, d_cont, atr_pct)
         p1 = min(20.0, htf_pts_c)
         p2 = min(25.0, bull_poi_score if d_cont == 1 else bear_poi_score)
@@ -1330,30 +1442,74 @@ def analyze_smc_symbol(
         blocked_by_4h_wall = (d_cont == 1 and in_supply_4h_now) or (d_cont == -1 and in_demand_4h_now)
         tp2_move_pct = abs(geom_c["tp2"] - geom_c["plan_entry"]) / geom_c["plan_entry"] * 100.0
         notes_c: List[str] = []
-
-        if geom_c["at_poi"] and candle_rejected and htf_aligned and not blocked_by_4h_wall and tot_c >= cfg.smc_entry_score and rr_c >= cfg.min_rr and tp2_move_pct >= 1.4:
-            status_c = "ENTRY READY"
-            exec_c = "ENTRY_NOW"
-            tier_c = 0
-        elif tot_c >= cfg.smc_watch_score and rr_c >= 1.6 and tp2_move_pct >= 1.0:
-            status_c = "WATCHLIST"
-            exec_c = "WAIT_SWEEP_TRIGGER" if geom_c["at_poi"] else "LIMIT_RETEST"
-            dist_from_edge = (cur_p - geom_c["poi_high"]) if d_cont == 1 else (geom_c["poi_low"] - cur_p)
-            # Jika harga sudah di POI menunggu close candle -> tier 1; jika sudah memantul jauh -> tier 3 agar kalah dari PRE-TAP segar!
-            tier_c = 1 if dist_from_edge <= 0.35 * atr_1h else 3
-            if blocked_by_4h_wall:
-                notes_c.append("Harga saat ini berada di dalam zona Tembok 4H berlawanan; ditahan di WATCHLIST.")
-                tier_c = 3
-            elif geom_c["at_poi"] and not candle_rejected:
-                notes_c.append("Harga sedang menguji zona POI namun candle 15M terakhir belum menutup searah pantulan; tunggu konfirmasi.")
-            elif not htf_aligned:
-                notes_c.append("Setup berlawanan dengan tren 4H & 1H sekaligus; ditahan di WATCHLIST.")
-        else:
-            status_c = "REJECT"
-            exec_c = "SKIP"
-            tier_c = 4
-
         z_fresh_c = bool((ltf_poi and ltf_poi.get("fresh")) or (htf_poi and htf_poi.get("fresh")))
+        dist_from_edge = (cur_p - geom_c["poi_high"]) if d_cont == 1 else (geom_c["poi_low"] - cur_p)
+
+        if getattr(cfg, "focus_3_pillars", True):
+            # PILAR 3: Hanya ambil SMC_SNIPER berkualitas tinggi (Skor >= 75, dekat POI) atau FIRST TOUCH Fresh FVG (Skor >= 78)
+            is_sniper_pillar = (kind_c == "SMC_SNIPER" and tot_c >= 75.0 and dist_from_edge <= 0.65 * atr_1h)
+            is_first_touch_fvg = (
+                kind_c == "SMC_FVG_FILL"
+                and geom_c["at_poi"]
+                and z_fresh_c
+                and tot_c >= 78.0
+                and candle_rejected
+                and htf_aligned
+                and not blocked_by_4h_wall
+            )
+            if is_sniper_pillar or is_first_touch_fvg:
+                if (
+                    geom_c["at_poi"]
+                    and candle_rejected
+                    and htf_aligned
+                    and not blocked_by_4h_wall
+                    and tot_c >= max(float(cfg.smc_entry_score), 75.0)
+                    and rr_c >= cfg.min_rr
+                    and tp2_move_pct >= 1.4
+                ):
+                    status_c = "ENTRY READY"
+                    exec_c = "ENTRY_NOW"
+                    tier_c = 0
+                elif is_sniper_pillar and rr_c >= cfg.min_rr and tp2_move_pct >= 1.4 and not blocked_by_4h_wall:
+                    status_c = "WATCHLIST"
+                    exec_c = "WAIT_SWEEP_TRIGGER" if geom_c["at_poi"] else "LIMIT_RETEST"
+                    tier_c = 1 if dist_from_edge <= 0.35 * atr_1h else 2
+                    if geom_c["at_poi"] and not candle_rejected:
+                        notes_c.append("SMC Sniper di POI namun candle 15M terakhir belum menutup searah pantulan; tunggu close konfirmasi.")
+                    elif not htf_aligned:
+                        notes_c.append("SMC Sniper berlawanan dengan salah satu HTF; tunggu konfirmasi ekstra di POI.")
+                else:
+                    status_c = "REJECT"
+                    exec_c = "SKIP"
+                    tier_c = 5
+            else:
+                status_c = "REJECT"
+                exec_c = "SKIP"
+                tier_c = 5
+                notes_c.append(
+                    "Disaring oleh Mode Fokus 3 Pilar Paten (mengabaikan OB Retest/Breaker pasif & fokus pada Reversal Watch, Pre-Tap Limit OB Segar, dan SMC Sniper >= 75)."
+                )
+        else:
+            if geom_c["at_poi"] and candle_rejected and htf_aligned and not blocked_by_4h_wall and tot_c >= cfg.smc_entry_score and rr_c >= cfg.min_rr and tp2_move_pct >= 1.4:
+                status_c = "ENTRY READY"
+                exec_c = "ENTRY_NOW"
+                tier_c = 0
+            elif tot_c >= cfg.smc_watch_score and rr_c >= 1.6 and tp2_move_pct >= 1.0:
+                status_c = "WATCHLIST"
+                exec_c = "WAIT_SWEEP_TRIGGER" if geom_c["at_poi"] else "LIMIT_RETEST"
+                tier_c = 1 if dist_from_edge <= 0.35 * atr_1h else 3
+                if blocked_by_4h_wall:
+                    notes_c.append("Harga saat ini berada di dalam zona Tembok 4H berlawanan; ditahan di WATCHLIST.")
+                    tier_c = 3
+                elif geom_c["at_poi"] and not candle_rejected:
+                    notes_c.append("Harga sedang menguji zona POI namun candle 15M terakhir belum menutup searah pantulan; tunggu konfirmasi.")
+                elif not htf_aligned:
+                    notes_c.append("Setup berlawanan dengan tren 4H & 1H sekaligus; ditahan di WATCHLIST.")
+            else:
+                status_c = "REJECT"
+                exec_c = "SKIP"
+                tier_c = 4
+
         st_cont = make_setup_obj(
             d_cont, "TREND_CONT", "Follow-Trend (Post-Reaction)", exec_c, app_lbl_c,
             kind_c, pat_c, poi_label, z_fresh_c, geom_c, tot_c, parts_c, status_c, confs_c, notes_c,
@@ -1502,12 +1658,12 @@ def analyze_smc_symbol(
         else:
             idm_fuel_pts = 8.0
 
-        # Skor Konteks HTF, Posisi Range, R:R, & Orderflow (0..20)
+        # Skor Konteks HTF, Posisi Range, R:R >= 1:3, & Orderflow (0..20)
         rr_p = geom_p["rr"]
         ctx_rr_pts = (
             (8.0 if htf_p >= 20.0 else (5.5 if htf_p >= 14.0 else 3.0))
             + (4.0 if ((d_pre == 1 and w_pos_pct <= 40.0) or (d_pre == -1 and w_pos_pct >= 60.0)) else 1.5)
-            + (6.0 if rr_p >= 2.5 else (4.5 if rr_p >= 2.0 else (2.0 if rr_p >= 1.7 else 0.0)))
+            + (6.0 if rr_p >= 3.5 else (5.0 if rr_p >= 3.0 else (2.0 if rr_p >= 2.5 else 0.0)))
             + min(2.0, (of_bull_pts if d_pre == 1 else of_bear_pts) * 0.4)
         )
         ctx_rr_pts = min(20.0, ctx_rr_pts)
@@ -1526,30 +1682,50 @@ def analyze_smc_symbol(
 
         tp2_pct_p = abs(geom_p["tp2"] - geom_p["plan_entry"]) / geom_p["plan_entry"] * 100.0
         notes_pre: List[str] = []
-        # Limit buta sebelum reaksi (PRE-TAP LIMIT) wajib berjangkar pada Order Block (OB) HTF nyata agar SL dilindungi swing struktural (bukan FVG kosong)
-        is_ob_anchor = (chosen_htf is not None) and (
-            "OB" in chosen_htf["kind"]
+        # Limit buta sebelum reaksi (PRE-TAP LIMIT) wajib berjangkar pada Order Block (OB) nyata agar SL dilindungi swing struktural + likuiditas (bukan FVG kosong)
+        is_ob_anchor = (
+            (chosen_htf is not None and "OB" in chosen_htf["kind"])
             or (chosen_ltf is not None and "OB" in chosen_ltf["kind"] and chosen_ltf.get("swept"))
         )
-        strong_htf_backing = is_ob_anchor and (htf_p >= 14.0) and (disp_v >= 1.20 or has_fvg_z)
-        if strong_htf_backing and tot_pre >= 78.0 and rr_p >= max(cfg.min_rr, 2.2) and tp2_pct_p >= 1.45 and geom_p["est_h2"] <= cfg.max_hold_hours:
-            if app_code_p == "IMPULSIF_LIAR":
-                status_pre = "WATCHLIST"
-                exec_pre = "WAIT_SWEEP_TRIGGER"
-                tier_pre = 2
-                notes_pre.append("Zona POI sangat segar, namun pendekatan candle saat ini tajam/impulsif; tunggu tusukan sweep/CISD sebelum entry.")
-            else:
-                status_pre = "PRE-TAP LIMIT"
-                exec_pre = "LIMIT_PRE_TAP"
-                tier_pre = 1
-        elif tot_pre >= 60.0 and rr_p >= 1.80 and tp2_pct_p >= 1.0:
-            status_pre = "WATCHLIST"
-            exec_pre = "WAIT_SWEEP_TRIGGER" if (app_code_p == "IMPULSIF_LIAR" or not is_ob_anchor) else "LIMIT_PRE_TAP"
-            tier_pre = 2
+        strong_htf_backing = is_ob_anchor and (
+            htf_p >= 14.0 or (d_pre == 1 and r4_pos <= 35.0) or (d_pre == -1 and r4_pos >= 65.0)
+        ) and (disp_v >= 1.15 or has_fvg_z)
+
+        if getattr(cfg, "focus_3_pillars", True):
+            # PILAR 2: Wajib OB Segar (0 Touches) dengan Skor >= 74 & R:R >= 1:3.0 (cfg.min_rr); buang FVG/Breaker murni tanpa jangkar OB
             if not is_ob_anchor:
-                notes_pre.append("Zona Pre-Tap berbasis FVG/Breaker tanpa tameng Order Block HTF; tunggu sweep/reaksi mikro di dalam zona sebelum masuk.")
+                continue
+            if strong_htf_backing and tot_pre >= 74.0 and rr_p >= max(cfg.min_rr, 3.0) and tp2_pct_p >= 1.50:
+                if app_code_p == "IMPULSIF_LIAR":
+                    status_pre = "WATCHLIST"
+                    exec_pre = "WAIT_SWEEP_TRIGGER"
+                    tier_pre = 2
+                    notes_pre.append("Zona OB POI sangat segar (0 touch), namun pendekatan candle saat ini impulsif; tunggu tusukan sweep/CISD sebelum entry.")
+                else:
+                    status_pre = "PRE-TAP LIMIT"
+                    exec_pre = "LIMIT_PRE_TAP"
+                    tier_pre = 1
+            else:
+                continue
         else:
-            continue
+            if strong_htf_backing and tot_pre >= 78.0 and rr_p >= max(cfg.min_rr, 2.2) and tp2_pct_p >= 1.45 and geom_p["est_h2"] <= cfg.max_hold_hours:
+                if app_code_p == "IMPULSIF_LIAR":
+                    status_pre = "WATCHLIST"
+                    exec_pre = "WAIT_SWEEP_TRIGGER"
+                    tier_pre = 2
+                    notes_pre.append("Zona POI sangat segar, namun pendekatan candle saat ini tajam/impulsif; tunggu tusukan sweep/CISD sebelum entry.")
+                else:
+                    status_pre = "PRE-TAP LIMIT"
+                    exec_pre = "LIMIT_PRE_TAP"
+                    tier_pre = 1
+            elif tot_pre >= 60.0 and rr_p >= 1.80 and tp2_pct_p >= 1.0:
+                status_pre = "WATCHLIST"
+                exec_pre = "WAIT_SWEEP_TRIGGER" if (app_code_p == "IMPULSIF_LIAR" or not is_ob_anchor) else "LIMIT_PRE_TAP"
+                tier_pre = 2
+                if not is_ob_anchor:
+                    notes_pre.append("Zona Pre-Tap berbasis FVG/Breaker tanpa tameng Order Block HTF; tunggu sweep/reaksi mikro di dalam zona sebelum masuk.")
+            else:
+                continue
 
         pat_pre = (
             f"Pre-Tap Fresh Demand Stalker ({chosen_htf['tf'] if chosen_htf else '15M'} Unmitigated POI)"
@@ -1638,7 +1814,7 @@ def analyze_smc_symbol(
         )
         shift_pts = min(18.0, (11.0 if has_shift_r else 0.0) + (7.0 if has_pin_r else 0.0))
         rr_r = geom_r["rr"]
-        rr_pts_r = 12.0 if rr_r >= 2.4 else (9.0 if rr_r >= 2.0 else (5.0 if rr_r >= 1.8 else 0.0))
+        rr_pts_r = 12.0 if rr_r >= 3.5 else (10.0 if rr_r >= 3.0 else (4.0 if rr_r >= 2.5 else 0.0))
 
         tot_rev = clamp(wall_pts + range_ext_pts + climax_pts + shift_pts + rr_pts_r, 0.0, 100.0)
         parts_rev = [
@@ -1646,7 +1822,7 @@ def analyze_smc_symbol(
             ("Ekstremitas Dealing Range", round(range_ext_pts, 1), 15),
             ("Liquidity Sweep & Climax", round(climax_pts, 1), 25),
             ("Shift Struktur 15M (CHOCH/CISD)", round(shift_pts, 1), 18),
-            ("Ruang R:R ke Equilibrium", round(rr_pts_r, 1), 12),
+            ("Ruang R:R >= 1:3", round(rr_pts_r, 1), 12),
         ]
 
         confs_rev = [f"Tembok {wall_z['kind']}", f"Makro 4H {r4_pos:.0f}% / 1H {w_pos_pct:.0f}%"]
@@ -1667,18 +1843,26 @@ def analyze_smc_symbol(
         tp2_pct_r = abs(geom_r["tp2"] - geom_r["plan_entry"]) / geom_r["plan_entry"] * 100.0
         notes_rev: List[str] = []
 
-        if in_wall_flag and has_sw_r and has_shift_r and candle_rej_r and tot_rev >= cfg.smc_entry_score and rr_r >= cfg.min_rr and tp2_pct_r >= 1.4:
+        # PILAR 1: HTF_REVERSAL (Counter-Trend / Wall-Bounce Inversion di Tembok Mayor 4H/1H) — Wajib R:R >= 1:3.0
+        if (
+            in_wall_flag
+            and (has_sw_r or has_shift_r)
+            and candle_rej_r
+            and tot_rev >= max(float(cfg.smc_entry_score) - 2.0, 68.0)
+            and rr_r >= max(cfg.min_rr, 3.0)
+            and tp2_pct_r >= 1.5
+        ):
             status_rev = "ENTRY READY"
             exec_rev = "ENTRY_NOW"
             tier_rev = 0
-            pat_rev = f"HTF Wall Reversal Confirmed ({wall_z['tf']} {'Demand' if d_rev==1 else 'Supply'} + Sweep + Shift)"
-        elif tot_rev >= 58.0 and rr_r >= 1.80 and tp2_pct_r >= 1.1:
+            pat_rev = f"HTF Wall Reversal Confirmed ({wall_z['tf']} {'Demand' if d_rev==1 else 'Supply'} + Sweep/Shift)"
+        elif tot_rev >= 60.0 and rr_r >= max(cfg.min_rr, 3.0) and tp2_pct_r >= 1.3:
             status_rev = "REVERSAL WATCH"
             exec_rev = "WAIT_SWEEP_TRIGGER"
-            tier_rev = 1 if (in_wall_flag or near_walls[0][1] <= 0.65 * atr_1h) else 2
+            tier_rev = 1 if (in_wall_flag or near_walls[0][1] <= 0.85 * atr_1h) else 2
             pat_rev = f"HTF Key-Area Reversal Stalker ({wall_z['kind']})"
             notes_rev.append(
-                "Potensi keterbalikan tren (Counter-Trend) di tembok mayor: wajib tunggu Sweep likuiditas + close 15M CHOCH/CISD sebelum masuk."
+                "Potensi keterbalikan tren (Counter-Trend) di tembok mayor: wajib tunggu Sweep likuiditas + close 15M CHOCH/CISD sebelum masuk (SL tetap di balik likuiditas tanpa geser BEP)."
             )
         else:
             continue
@@ -1692,8 +1876,14 @@ def analyze_smc_symbol(
     if not candidates:
         return None
 
-    # Pilih setup terbaik: Tier lebih kecil (0=ENTRY READY, 1=PRE-TAP LIMIT / ACTIVE REVERSAL / AT-POI, dst.) & Skor tertinggi
-    candidates.sort(key=lambda item: (item[0], -item[1]))
+    # Pilih setup terbaik: utamakan Pilar 1 (HTF_REVERSAL) & Pilar 2 (PRE_REACTION) pada tier yang setara, lalu skor tertinggi
+    candidates.sort(
+        key=lambda item: (
+            item[0],
+            0 if item[2].archetype in ("HTF_REVERSAL", "PRE_REACTION") else 1,
+            -item[1],
+        )
+    )
     best_setup = candidates[0][2]
 
     best_d = 1 if best_setup.direction == "LONG" else -1

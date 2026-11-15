@@ -235,8 +235,14 @@ def describe(s: Setup, rank: int, btc: Optional[dict], cfg: Config) -> str:
             f"EQ {fp(s.range_1h_eq)}{pos1_str} | Estimasi Durasi Trade: {s.est_hold_label or '-'}"
         )
     sl_rat = f"{s.sl_atr_1h_ratio:.2f}x ATR 1H" if not math.isnan(s.sl_atr_1h_ratio) else "-"
+    guard_info = f" | Proteksi SL di balik: {s.liq_guard_info}" if getattr(s, "liq_guard_info", "") else ""
+    sw_entry_info = (
+        f" | Batas Sweep-Entry: {fp(s.sweep_entry_lvl)}"
+        if (not math.isnan(getattr(s, "sweep_entry_lvl", NAN)))
+        else ""
+    )
     L.append(
-        f"       - [15M Zoom-Out Check] Zona Ideal POI [{s.entry_zone}] | Lebar SL: {s.risk_pct:.2f}% ({sl_rat} — proporsional 1H)"
+        f"       - [15M Zoom-Out Check] Zona Ideal POI [{s.entry_zone}]{sw_entry_info} | Lebar SL: {s.risk_pct:.2f}% ({sl_rat}){guard_info}"
     )
     if s.zone_badge or s.active_zones_summary:
         L.append(f"       - [Lokasi Harga Live]  {s.zone_badge} | {s.active_zones_summary}")
@@ -284,9 +290,14 @@ def describe(s: Setup, rank: int, btc: Optional[dict], cfg: Config) -> str:
     L.append(f"    4. Status Eksekusi: {state}")
 
     rr1_val = s.rr_tp1 if not math.isnan(s.rr_tp1) else (s.rr / 2.0)
+    tp3_txt = (
+        f" | TP3 Runner {fp(s.tp3)} (+{s.tp3_pct:.2f}%, RR 1:{s.rr_tp3:.1f})"
+        if (not math.isnan(getattr(s, "tp3", NAN)) and not math.isnan(getattr(s, "rr_tp3", NAN)))
+        else ""
+    )
     L.append(
-        f"    5. Acuan Entry {fp(s.entry)} (Zona POI: {s.entry_zone} | Mid CE: {fp(s.limit_entry)}) | SL {fp(s.sl)} (-{s.risk_pct:.2f}%) | "
-        f"TP1 {fp(s.tp1)} (+{s.tp1_pct:.2f}%, RR 1:{rr1_val:.1f}) | TP2 {fp(s.tp2)} (+{s.tp2_pct:.2f}%, RR 1:{s.rr:.1f})."
+        f"    5. Acuan Entry {fp(s.entry)} (Zona POI: {s.entry_zone} | Mid CE: {fp(s.limit_entry)}) | SL Tetap (No BEP) {fp(s.sl)} (-{s.risk_pct:.2f}%) | "
+        f"Checkpoint TP1 {fp(s.tp1)} (+{s.tp1_pct:.2f}%, RR 1:{rr1_val:.1f}) | Target Utama TP2 {fp(s.tp2)} (+{s.tp2_pct:.2f}%, RR 1:{s.rr:.1f}){tp3_txt}."
     )
     if not math.isnan(s.qty):
         L.append(f"       Ukuran posisi (risiko {s.risk_usdt:.2f} USDT termasuk fee taker): qty {s.qty:g}, notional {s.notional:.2f} USDT.")
@@ -363,7 +374,7 @@ def build_report(
     spd = f"   |   Durasi: {elapsed_s:.1f}s" if elapsed_s > 0 else ""
     mode_tag = " [RADAR LIVE ZONE]" if cfg.radar_mode else (" [FILTER: IN/PRE-TAP ZONE]" if cfg.only_in_zone else "")
     out.append(
-        f"BINANCE USDT-M FUTURES DYNAMIC 3-ARCHETYPE SMC/ICT + PRE-REACTION & REVERSAL SCANNER{mode_tag}   |   Scan: {scan_ts} UTC{spd}"
+        f"BINANCE USDT-M FUTURES 3-PILAR PATEN SMC/ICT (REVERSAL WATCH + PRE-TAP LIMIT + SNIPER >= 75){mode_tag}   |   Scan: {scan_ts} UTC{spd}"
     )
     out.append("=" * 144)
     out.append(
@@ -377,7 +388,7 @@ def build_report(
             f"candle close 4H {ts_utc(btc['4h']['last_time'])} UTC (referensi makro saja, altcoin dinilai independen)"
         )
     out.append(
-        "Variasi Dinamis: [1] Follow-Trend Post-Reaction  |  [2] Pre-Tap Limit (Sebelum Bereaksi di Zona Segar)  |  [3] HTF Wall Reversal + Forward Playbook."
+        "Fokus 3 Pilar Paten (Gaya Min RR 1:3.0 + Fixed SL Tanpa Geser BEP): [Pilar 1] Reversal Watch  |  [Pilar 2] Pre-Tap Limit (OB Segar)  |  [Pilar 3] SMC Sniper (>= 75)."
     )
     out.append("")
 
@@ -489,7 +500,9 @@ def build_report(
                 "SL%": f"{r.risk_pct:.2f}%",
                 "TP1": fp(r.tp1),
                 "TP2": fp(r.tp2),
+                "TP3": fp(r.tp3) if not math.isnan(getattr(r, "tp3", NAN)) else "-",
                 "RR": f"1:{r.rr:.1f}",
+                "RR3": f"1:{r.rr_tp3:.1f}" if not math.isnan(getattr(r, "rr_tp3", NAN)) else "-",
                 "Hold": hold_short,
                 "Score": f"{r.score:.0f}",
                 "AI": ai_verdict,
@@ -511,18 +524,19 @@ def build_report(
             hold_s = f"~{r.est_hold_hours_tp1:.0f}-{r.est_hold_hours_tp2:.0f}j" if not math.isnan(r.est_hold_hours_tp2) else "-"
             z_b = trim(r.zone_badge or "-", 27)
             tac_s = _short_exec_tactic(r)
+            rr3_s = f" | TP3 1:{r.rr_tp3:.1f}" if not math.isnan(getattr(r, "rr_tp3", NAN)) else ""
             out.append(
                 f"  {r.symbol:<12} {r.direction:<5} {z_b:<27} [{tac_s:<15}] score {r.score:>3.0f}  "
-                f"Entry {fp(r.entry):<10} SL {r.risk_pct:>4.2f}%  RR 1:{r.rr:<3.1f}  Hold {hold_s:<7} POI [{r.entry_zone}]"
+                f"Entry {fp(r.entry):<10} SL {r.risk_pct:>4.2f}%  RR 1:{r.rr:<3.1f}{rr3_s}  Hold {hold_s:<7} POI [{r.entry_zone}]"
             )
             if show_playbook_hint and r.forward_playbook:
-                out.append(f"      ↳ Langkah: {trim(r.forward_playbook, 128)}")
+                out.append(f"      ↳ Langkah: {trim(r.forward_playbook, 136)}")
         out.append("")
 
     section("A. ENTRY READY — Sudah Konfirmasi Reaksi di POI (Siap Eksekusi)", ready_list, show_playbook_hint=True)
-    section("B. PRE-TAP LIMIT & FIRST TOUCH — Mendekati Supply/Demand/OB Segar SEBELUM Bereaksi", pretap_list, show_playbook_hint=True)
-    section("C. REVERSAL WATCH — Potensi Keterbalikan Tren di Area Kunci 4H/1H (Tunggu Sweep + Shift)", rev_list, show_playbook_hint=True)
-    section("D. WATCHLIST — Pantauan Retest / Menunggu Close Candle Konfirmasi", watch_list, show_playbook_hint=False)
+    section("B. PILAR 2: PRE-TAP LIMIT & FIRST TOUCH — Mendekati OB Segar (0-Touch) SEBELUM Bereaksi", pretap_list, show_playbook_hint=True)
+    section("C. PILAR 1: REVERSAL WATCH — Keterbalikan Tren di Tembok Kunci 4H/1H (Tunggu Sweep + Shift)", rev_list, show_playbook_hint=True)
+    section("D. PILAR 3: SMC SNIPER WATCHLIST — Pantauan Sniper Skor >= 75 Menunggu Close Konfirmasi", watch_list, show_playbook_hint=False)
 
     if not cfg.radar_mode:
         render_radar_section()
@@ -593,10 +607,15 @@ def results_to_df(results: list, scan_ts: str) -> pd.DataFrame:
             "stop_loss": r.sl,
             "tp1": r.tp1,
             "tp2": r.tp2,
+            "tp3": getattr(r, "tp3", NAN),
+            "rr_tp3": round(r.rr_tp3, 2) if not math.isnan(getattr(r, "rr_tp3", NAN)) else NAN,
             "risk_pct": round(r.risk_pct, 3),
             "sl_atr_1h_ratio": round(r.sl_atr_1h_ratio, 2) if not math.isnan(r.sl_atr_1h_ratio) else NAN,
             "tp1_pct": round(r.tp1_pct, 3),
             "tp2_pct": round(r.tp2_pct, 3),
+            "tp3_pct": round(r.tp3_pct, 3) if not math.isnan(getattr(r, "tp3_pct", NAN)) else NAN,
+            "liq_guard_info": getattr(r, "liq_guard_info", ""),
+            "sweep_entry_lvl": getattr(r, "sweep_entry_lvl", NAN),
             "est_hold_h_tp1": round(r.est_hold_hours_tp1, 1) if not math.isnan(r.est_hold_hours_tp1) else NAN,
             "est_hold_h_tp2": round(r.est_hold_hours_tp2, 1) if not math.isnan(r.est_hold_hours_tp2) else NAN,
             "est_hold_label": r.est_hold_label,
@@ -957,8 +976,9 @@ def main() -> None:
     p.add_argument("--sync", action="store_true", help="gunakan mode HTTP sinkron klasik (tanpa aiohttp)")
     p.add_argument("--no-deriv", action="store_true", help="lewati pengambilan data Open Interest & Long/Short Ratio")
     p.add_argument("--no-ai", action="store_true", help="nonaktifkan evaluasi Full LLM (gunakan murni skor & playbook MTF Python)")
-    p.add_argument("--ai-top", type=int, default=Config.ai_top_n, help="jumlah kandidat teratas yang dikurasi Full LLM (default 10)")
+    p.add_argument("--ai-top", type=int, default=Config.ai_top_n, help="jumlah kandidat teratas yang dikurasi Full LLM (default 8)")
     p.add_argument("--ai-model", type=str, default="", help="override model Groq AI")
+    p.add_argument("--all-setups", action="store_true", help="tampilkan kembali seluruh setup lama (OB Retest/Breaker pasif) di luar 3 Pilar Paten")
     p.add_argument("--out", type=str, default="scan_output", help="folder output CSV dan TXT")
     p.add_argument("--loop", action="store_true", help="jalan terus setiap penutupan candle 15M")
     p.add_argument("--watch-ws", action="store_true", help="pantau live sentuhan zona POI, CE 50%%, Sweep, TP, & SL via WebSocket")
@@ -1002,6 +1022,7 @@ def main() -> None:
         fetch_derivatives=not args.no_deriv,
         ai_audit=use_ai,
         ai_top_n=args.ai_top,
+        focus_3_pillars=not args.all_setups,
         only_in_zone=bool(args.in_zone or args.radar),
         radar_mode=bool(args.radar),
         near_poi_pct=max(0.05, args.near_pct),

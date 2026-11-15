@@ -69,12 +69,13 @@ def simulate_trade_on_bars(
     max_hold_hours: float = 48.0,
     fee_pct: float = 0.04,
     is_historical_complete: bool = True,
+    move_sl_to_bep: bool = False,
 ) -> dict:
     """
     Mensimulasikan hasil sinyal pada bar 15M setelah sinyal close:
-    Manajemen posisi institusional:
-    - Ambil 50% profit di TP1 + geser sisa 50% SL ke Breakeven (BEP).
-    - Sisa 50% ditutup di TP2 (atau BEP jika berbalik).
+    Gaya Trader Default (move_sl_to_bep=False):
+    - Set-and-Forget Fixed Structural SL (TIDAK menggeser SL ke BEP walaupun harga sudah menyentuh TP1).
+    - Target penuh 100% ditutup di Target Utama TP2 (>= 1:3.0 R) atau terkena SL struktural (-1.0 R).
     - Jika 1 bar menyentuh SL dan TP sekaligus pada bar yang sama, dihitung konservatif (SL duluan).
     """
     is_long = direction == "LONG"
@@ -130,6 +131,26 @@ def simulate_trade_on_bars(
 
     for j in range(start_bar, end_idx):
         dur_h = max(0.25, (int(times[j]) - entry_ms + 900_000) / 3_600_000.0)
+        if not move_sl_to_bep:
+            # Gaya Set-and-Forget Fixed SL (Tidak geser SL ke BEP; bidik penuh Target Utama TP2 >= 1:3)
+            if is_long:
+                if l[j] <= sl:
+                    return {"outcome": "LOSS_SL", "realized_r": round(-1.0 - fee_r, 3), "hold_hours": round(dur_h, 2), "tp1_hit": tp1_hit}
+                if h[j] >= tp1:
+                    tp1_hit = True
+                if h[j] >= tp2:
+                    net_r = rr2 - fee_r
+                    return {"outcome": "TP2_FULL", "realized_r": round(net_r, 3), "hold_hours": round(dur_h, 2), "tp1_hit": True}
+            else:
+                if h[j] >= sl:
+                    return {"outcome": "LOSS_SL", "realized_r": round(-1.0 - fee_r, 3), "hold_hours": round(dur_h, 2), "tp1_hit": tp1_hit}
+                if l[j] <= tp1:
+                    tp1_hit = True
+                if l[j] <= tp2:
+                    net_r = rr2 - fee_r
+                    return {"outcome": "TP2_FULL", "realized_r": round(net_r, 3), "hold_hours": round(dur_h, 2), "tp1_hit": True}
+            continue
+
         if is_long:
             if not tp1_hit:
                 # Konservatif: cek SL lebih dulu sebelum TP1 di bar yang sama
@@ -171,10 +192,10 @@ def simulate_trade_on_bars(
     rem_r = ((last_close - actual_entry) / risk) if is_long else ((actual_entry - last_close) / risk)
 
     if len(future_df) - start_bar < max_bars and not is_historical_complete:
-        unreal_r = (0.5 * rr1 + 0.5 * max(0.0, rem_r) - fee_r) if tp1_hit else (rem_r - fee_r)
+        unreal_r = ((0.5 * rr1 + 0.5 * max(0.0, rem_r) - fee_r) if (move_sl_to_bep and tp1_hit) else (rem_r - fee_r))
         return {"outcome": "OPEN", "realized_r": round(unreal_r, 3), "hold_hours": round(dur_h, 2), "tp1_hit": tp1_hit}
 
-    final_r = (0.5 * rr1 + 0.5 * max(0.0, rem_r) - fee_r) if tp1_hit else (rem_r - fee_r)
+    final_r = ((0.5 * rr1 + 0.5 * max(0.0, rem_r) - fee_r) if (move_sl_to_bep and tp1_hit) else (rem_r - fee_r))
     return {"outcome": "TIME_EXIT", "realized_r": round(final_r, 3), "hold_hours": round(dur_h, 2), "tp1_hit": tp1_hit}
 
 

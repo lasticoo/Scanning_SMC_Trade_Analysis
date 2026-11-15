@@ -147,7 +147,11 @@ def build_full_llm_smc_prompt(setup: Any, btc_ctx: Optional[dict] = None) -> str
     sl = getattr(setup, "sl", 0.0)
     tp1 = getattr(setup, "tp1", 0.0)
     tp2 = getattr(setup, "tp2", 0.0)
+    tp3 = getattr(setup, "tp3", tp2)
     rr = getattr(setup, "rr", 0.0)
+    rr3 = getattr(setup, "rr_tp3", rr)
+    liq_guard = getattr(setup, "liq_guard_info", "")
+    sw_entry = getattr(setup, "sweep_entry_lvl", float("nan"))
     t4 = getattr(setup, "trend_4h", "Netral")
     s1 = getattr(setup, "struct_1h", "Netral")
     confirm = getattr(setup, "confirm_txt", "")
@@ -218,7 +222,11 @@ def build_full_llm_smc_prompt(setup: Any, btc_ctx: Optional[dict] = None) -> str
         b4_str = "Bullish" if b4 == 1 else ("Bearish" if b4 == -1 else "Netral")
         btc_note = f"BTC 4H: {b4_str} (Referensi makro saja; altcoin dinilai 100% independen dari struktur koin sendiri)"
 
-    prompt = f"""Kurator SMC/ICT Modern Crypto Futures (4H->1H->15M & Orderflow). Evaluasi setup sesuai karakter liar kripto (stop-hunt/Judas Swing), jaga jarak dekat & durasi <=36j, beri langkah taktis jelas.
+    tp3_str = f" | TP3 Runner: {fp(tp3)} (RR 1:{rr3:.1f})" if (isinstance(tp3, (int, float)) and not math.isnan(tp3) and tp3 != tp2) else ""
+    guard_str = f" | Proteksi SL di balik: {liq_guard}" if liq_guard else ""
+    sw_entry_str = f" (Batas Sweep-Entry: {fp(sw_entry)})" if (isinstance(sw_entry, (int, float)) and not math.isnan(sw_entry)) else ""
+
+    prompt = f"""Kurator 3 Pilar Paten SMC/ICT Modern Crypto Futures (4H->1H->15M & Orderflow). Evaluasi setup sesuai gaya trader: WAJIB R:R minimal 1:3.0 (Target Utama TP2 >= 3.0R) dan PANTANG MENGGESER SL KE BEP (Set-and-Forget Fixed SL di balik kolam likuiditas agar tahan retest kripto).
 
 [SETUP {symbol}] Harga: {fp(cur_p)} | Sesi: {sess_txt} | {btc_note}
 - Archetype: {archetype} ({arch_lbl}) | {direction} ({pattern}) | Taktik Awal: {exec_style} | Approach: {app_style} | Est. Sentuh: {tap_txt}
@@ -232,17 +240,17 @@ def build_full_llm_smc_prompt(setup: Any, btc_ctx: Optional[dict] = None) -> str
 - OB15M: {obs_15_txt} | FVG15M: {fvgs_15_txt} | EQH15M[{eqh_15}] EQL15M[{eql_15}]
 - Orderflow: {of_txt} | Funding: {fund_pct:+.4f}%
 
-[LEVEL & ZOOM-OUT 1H] Entry: {fp(plan_entry)} (POI: {entry_zone} | {'Di POI' if at_poi else 'Menunggu Sentuhan'})
-- SL: {fp(sl)} | TP1: {fp(tp1)} | TP2: {fp(tp2)} (RR 1:{rr:.1f}) | Tembok Lawan: {opp_txt} | Invalidasi: {invalidation}
-- WAJIB: Jarak |Entry-SL| harus di antara {fp(min_sl_d)} s.d. {fp(max_sl_d)}, TP2 tidak menembus tembok 4H lawan.
+[LEVEL & FIXED LIQUIDITY-PROTECTED SL (NO BEP)] Entry: {fp(plan_entry)}{sw_entry_str} (POI: {entry_zone} | {'Di POI' if at_poi else 'Menunggu Sentuhan'})
+- SL Tetap: {fp(sl)}{guard_str} | Checkpoint TP1: {fp(tp1)} | Target Utama TP2: {fp(tp2)} (RR 1:{rr:.1f}, WAJIB >= 1:3.0){tp3_str} | Tembok Lawan: {opp_txt} | Invalidasi: {invalidation}
+- PRINSIP WAJIB TRADER: (1) R:R Target Utama (TP2) wajib minimal 1:3.0; (2) DILARANG KERAS menyarankan geser SL ke BEP / Break-Even dalam kondisi apapun — SL struktural di balik likuiditas dipertahankan tetap (Set & Forget) sampai menyentuh TP2/TP3 atau SL.
 
-[ATURAN STATUS]
-1. "ENTRY READY" ("ENTRY_NOW"): Harga SUDAH di/dekat POI + ada konfirmasi sweep/reaksi/CHOCH/CISD valid, RR>=2.0.
-2. "PRE-TAP LIMIT" ("LIMIT_PRE_TAP"): Setup PRE_REACTION mendekati POI segar (0 touch, <=2.6%) dgn pendekatan KOMPRESI/WAJAR -> siap Limit sebelum bereaksi (jika terjun marubozu liar -> ubah ke "WATCHLIST" + "WAIT_SWEEP_TRIGGER").
-3. "REVERSAL WATCH" ("WAIT_SWEEP_TRIGGER"): Setup HTF_REVERSAL di Tembok 4H/1H ekstrem -> dilarang limit buta, wajib tunggu Sweep + 15M CHOCH/CISD.
-4. "WATCHLIST": Sudah memantul jauh (tunggu Limit Retest) atau belum ada konfirmasi close. "REJECT": Zona lemah/RR<1.8.
+[ATURAN 3 PILAR PATEN (MIN RR 1:3.0)]
+1. "ENTRY READY" ("ENTRY_NOW"): Harga SUDAH di/dekat POI + ada konfirmasi sweep/reaksi/CHOCH/CISD valid, RR>=3.0.
+2. "PRE-TAP LIMIT" ("LIMIT_PRE_TAP"): Pilar 2 (PRE_REACTION) mendekati OB segar (0 touch, <=2.6%) dgn pendekatan KOMPRESI/WAJAR & RR>=3.0 -> siap Limit sebelum bereaksi.
+3. "REVERSAL WATCH" ("WAIT_SWEEP_TRIGGER"): Pilar 1 (HTF_REVERSAL) di Tembok 4H/1H ekstrem & RR>=3.0 -> wajib tunggu Sweep likuiditas + 15M CHOCH/CISD.
+4. "WATCHLIST": Pilar 3 (SMC_SNIPER Skor>=75, RR>=3.0) menunggu konfirmasi close/retest. "REJECT": Zona lemah atau RR<3.0.
 
-Balas HANYA JSON valid murni dlm Bahasa Indonesia lugas (tiap sub-elemen smc_elements cukup 1 kalimat padat <=16 kata; fokus tajam pada detailed_analysis, forward_playbook, flip_scenario):
+Balas HANYA JSON valid murni dlm Bahasa Indonesia lugas (tiap sub-elemen smc_elements cukup 1 kalimat padat <=16 kata; fokus tajam pada detailed_analysis, forward_playbook, flip_scenario TANPA kata BEP/Break-Even):
 {{
   "smc_elements": {{
     "order_blocks": "status OB/Breaker 4H-1H-15M & kesegarannya",
@@ -251,7 +259,7 @@ Balas HANYA JSON valid murni dlm Bahasa Indonesia lugas (tiap sub-elemen smc_ele
     "choch": "status/syarat CHOCH",
     "bos": "status BOS & displacement",
     "inducement": "status IDM di depan POI",
-    "supply_demand": "zona Supply/Demand & ruang ke tembok lawan",
+    "supply_demand": "zona Supply/Demand & ruang ke tembok lawan >=1:3",
     "pin_bar": "reaksi wick/approach & CVD",
     "cisd": "status CISD, OI, & L/S Ratio",
     "poi": "zona POI, taktik entry, & durasi hold"
@@ -266,9 +274,9 @@ Balas HANYA JSON valid murni dlm Bahasa Indonesia lugas (tiap sub-elemen smc_ele
   "tp1": {tp1},
   "tp2": {tp2},
   "rr": {rr:.2f},
-  "detailed_analysis": "ulasan padat SMC/ICT modern sesuai karakter liar kripto",
-  "forward_playbook": "Langkah Utama (If-Then): kondisi sekarang, harga/pemicu entry spesifik, & aturan ambil 50% TP1 + geser SL ke BEP",
-  "flip_scenario": "Skenario Flip/Batal: level close candle invalidasi jika zona jebol impulsif & rencana balik arah (Breaker)"
+  "detailed_analysis": "ulasan padat SMC/ICT modern sesuai karakter liar kripto & ruang target >=1:3",
+  "forward_playbook": "Langkah Utama (If-Then): kondisi sekarang, harga/pemicu entry spesifik, tahan SL tetap di tempat (tanpa geser SL), & kawal penuh ke Target Utama >=1:3 di TP2/TP3",
+  "flip_scenario": "Skenario Flip/Batal: level close candle invalidasi jika SL ditembus impulsif & rencana balik arah (Breaker)"
 }}"""
     return prompt
 
@@ -644,10 +652,17 @@ def _apply_safe_ai_levels(s: Any, res: dict) -> None:
         )
         if valid_order:
             orig_tp2 = float(s.tp2)
+            orig_sl_dist = abs(entry_p - float(s.sl))
             sl_dist = clamp(abs(entry_p - cand_sl), 0.85 * min_sl_d, 1.25 * max_sl_d)
+            # Jika SL sudah dilindungi di balik kolam likuiditas (Liquidity-Protected SL), cegah AI mempersempit SL kembali ke area stop-hunt!
+            if getattr(s, "liq_guard_info", ""):
+                sl_dist = max(sl_dist, orig_sl_dist * 0.98)
             s.sl = (entry_p - sl_dist) if d == 1 else (entry_p + sl_dist)
-            max_tp2_dist = max(abs(orig_tp2 - entry_p) * 1.35, 4.5 * sl_dist)
-            if abs(cand_tp2 - entry_p) <= max_tp2_dist:
+            max_tp2_dist = max(abs(orig_tp2 - entry_p) * 1.35, 5.5 * sl_dist)
+            cand_rr2 = abs(cand_tp2 - entry_p) / max(sl_dist, 1e-12)
+            orig_rr2 = abs(orig_tp2 - entry_p) / max(sl_dist, 1e-12)
+            # Hanya terima TP2 usulan AI jika tetap memenuhi standar R:R >= 1:3.0 (jangan biarkan AI memangkas TP2 di bawah 3R!)
+            if abs(cand_tp2 - entry_p) <= max_tp2_dist and (cand_rr2 >= 3.0 or orig_rr2 < 3.0):
                 s.tp1 = cand_tp1
                 s.tp2 = cand_tp2
 
@@ -660,6 +675,14 @@ def _apply_safe_ai_levels(s: Any, res: dict) -> None:
     s.tp2_pct = abs(s.tp2 - s.entry) / s.entry * 100.0
     s.rr_tp1 = abs(s.tp1 - s.entry) / risk
     s.rr = abs(s.tp2 - s.entry) / risk
+    tp3_v = getattr(s, "tp3", float("nan"))
+    if isinstance(tp3_v, (int, float)) and not math.isnan(tp3_v):
+        d_sign = 1 if s.direction == "LONG" else -1
+        if (d_sign == 1 and tp3_v < s.tp2 + 0.8 * risk) or (d_sign == -1 and tp3_v > s.tp2 - 0.8 * risk):
+            tp3_v = (s.tp2 + 1.2 * risk) if d_sign == 1 else (s.tp2 - 1.2 * risk)
+            s.tp3 = tp3_v
+        s.tp3_pct = abs(tp3_v - s.entry) / s.entry * 100.0
+        s.rr_tp3 = abs(tp3_v - s.entry) / risk
 
     atr_1h = getattr(s, "atr_1h", float("nan"))
     if not math.isnan(atr_1h) and atr_1h > 0:
@@ -676,13 +699,13 @@ def _apply_safe_ai_levels(s: Any, res: dict) -> None:
 
     z_st = getattr(s, "zone_state", "")
     arch = getattr(s, "archetype", "TREND_CONT")
-    if s.rr < 1.55:
+    if s.rr < 2.95:
         s.status = "REJECT"
         s.exec_style = "SKIP"
     elif s.status == "ENTRY READY" and (
-        s.rr < 1.96 or z_st in ("POST_BOUNCE_WAIT", "WAITING_PULLBACK", "IN_POI_TESTING", "PRE_TAP_STALK")
+        s.rr < 2.98 or z_st in ("POST_BOUNCE_WAIT", "WAITING_PULLBACK", "IN_POI_TESTING", "PRE_TAP_STALK")
     ):
-        if arch == "PRE_REACTION" and s.rr >= 1.96 and raw.get("approach_code") != "IMPULSIF_LIAR":
+        if arch == "PRE_REACTION" and s.rr >= 2.98 and raw.get("approach_code") != "IMPULSIF_LIAR":
             s.status = "PRE-TAP LIMIT"
             s.exec_style = "LIMIT_PRE_TAP"
         elif arch == "HTF_REVERSAL":
@@ -734,14 +757,14 @@ def _select_balanced_ai_slate(candidates: List[Any], max_audit: int) -> List[Any
 def audit_top_setups(
     results: List[Any],
     btc_ctx: Optional[dict] = None,
-    max_audit: int = 10,
+    max_audit: int = 8,
     workers: int = 3,
     equity: float = 0.0,
     risk_pct: float = 1.0,
     fee_pct: float = 0.05,
 ) -> None:
     """
-    Melakukan kurasi Full LLM secara cepat & seimbang lintas 3 Archetype (Trend Cont, Pre-Reaction, Reversal):
+    Melakukan kurasi Full LLM secara fokus & hemat token pada 3 Pilar Paten (Reversal Watch, Pre-Tap Limit OB Segar, & SMC Sniper >= 75):
     - Jika API Groq rate-limit / timeout / gagal parse, SKOR & STATUS PYTHON DIPERTAHANKAN UTUH (Proteksi Skor 0).
     - Memperbarui Forward Playbook & Flip Scenario dengan ulasan taktis AI.
     """
@@ -750,10 +773,14 @@ def audit_top_setups(
 
     candidates = [
         r for r in results
-        if (getattr(r, "status", "") in ("ENTRY READY", "PRE-TAP LIMIT", "REVERSAL WATCH")
-            or str(getattr(r, "status", "")).startswith("WATCHLIST")
-            or getattr(r, "score", 0) >= 52)
-        and getattr(r, "rr", 0.0) >= 1.55
+        if (
+            getattr(r, "status", "") in ("ENTRY READY", "PRE-TAP LIMIT", "REVERSAL WATCH")
+            or (
+                str(getattr(r, "status", "")).startswith("WATCHLIST")
+                and getattr(r, "score", 0.0) >= 72.0
+            )
+        )
+        and getattr(r, "rr", 0.0) >= 2.95
     ]
     st_prio = {
         "ENTRY READY": 0,
@@ -811,10 +838,16 @@ def audit_top_setups(
                 s.exec_style = res["execution_style"]
                 s.ai_decision = res["decision"]
                 s.ai_confidence = float(res["smc_score"])
-                s.ai_summary = res["detailed_analysis"]
-                s.ai_action_note = res["action_plan"]
+                clean_bep = lambda txt: re.sub(
+                    r"(?:,?\s*(?:dan|&|\+)?\s*geser\s+sl\s+ke\s+(?:bep|break[- ]?even)[^.,;]*)",
+                    ", tahan SL tetap di tempat (tanpa geser BEP)",
+                    txt,
+                    flags=re.IGNORECASE,
+                )
+                s.ai_summary = clean_bep(res["detailed_analysis"])
+                s.ai_action_note = clean_bep(res["action_plan"])
                 if res.get("forward_playbook"):
-                    s.forward_playbook = res["forward_playbook"]
+                    s.forward_playbook = clean_bep(res["forward_playbook"])
                 if res.get("flip_scenario"):
                     s.flip_scenario = res["flip_scenario"]
                 s.ai_model = res["model"]

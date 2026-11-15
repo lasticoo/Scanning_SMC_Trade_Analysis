@@ -53,7 +53,8 @@ class Config:
     min_sl_pct_alt: float = 0.0115    # 1.15% floor untuk altcoin & high-beta futures
     max_hold_hours: float = 36.0    # batas ideal durasi posisi agar tidak lama terkena funding
     mm_factor: float = 1.0
-    min_rr: float = 2.0
+    min_rr: float = 3.0             # wajib R:R minimal 1:3.0 sesuai gaya trader
+    fixed_sl_no_bep: bool = True    # Set-and-Forget SL di balik likuiditas (pantang geser SL ke BEP)
     entry_score: int = 80
     watch_score: int = 65
     # konteks HTF
@@ -73,7 +74,8 @@ class Config:
     fetch_derivatives: bool = True  # ambil Open Interest & Long/Short Ratio publik
     # evaluasi Full LLM (Groq)
     ai_audit: bool = True
-    ai_top_n: int = 10
+    ai_top_n: int = 8               # kuota kurasi AI terfokus pada 3 Pilar Paten (hemat token & cepat)
+    focus_3_pillars: bool = True    # fokus ke 3 Pilar Paten: REVERSAL WATCH, PRE-TAP LIMIT, & SMC_SNIPER (>=75)
     # filter & radar lokasi harga di Demand/Supply/POI/Sweep + Pre-Reaction Stalker
     only_in_zone: bool = False      # tampilkan hanya koin yang sudah di/dekat POI atau baru saja sweep
     radar_mode: bool = False        # fokus tampilan Radar Zona & Liquidity Sweep Live
@@ -115,11 +117,16 @@ class Setup:
     sl: float = NAN
     tp1: float = NAN
     tp2: float = NAN
+    tp3: float = NAN                # target Runner (3.5R - 8R+) menuju ekstrem Dealing Range 4H
     rr: float = NAN
     rr_tp1: float = NAN
+    rr_tp3: float = NAN
     risk_pct: float = NAN
     tp1_pct: float = NAN
     tp2_pct: float = NAN
+    tp3_pct: float = NAN
+    liq_guard_info: str = ""        # info tameng likuiditas di belakang POI (anti-Judas Swing / Stop-Hunt)
+    sweep_entry_lvl: float = NAN    # titik referensi kolam likuiditas (EQH/EQL/Wick) di belakang POI
     score: float = 0.0
     python_score: float = 0.0       # simpan skor murni Python sebelum AI
     parts: list = field(default_factory=list)
