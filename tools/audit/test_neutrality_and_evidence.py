@@ -45,6 +45,8 @@ def main() -> None:
     ev_errors = []
     ev_times_ms = []
     sample_prompts = {}
+    sweep_stale_cnt = 0
+    pb_beyond_cnt = 0
 
     for c in cases:
         total += 1
@@ -91,6 +93,18 @@ def main() -> None:
         ev = st.raw_market_data.get("evidence") if isinstance(st.raw_market_data, dict) else None
         if not isinstance(ev, dict) or ev.get("error") is not None:
             ev_errors.append({"case_id": c["case_id"], "ev": ev})
+        else:
+            fl = ev.get("flags", [])
+            sw1_age = (ev.get("sweep_1h") or {}).get("sweep_age_bars")
+            sw15_age = (ev.get("sweep_15m") or {}).get("sweep_age_bars")
+            is_stale = (sw1_age is not None and sw1_age > 60) or (sw15_age is not None and sw15_age > 60)
+            if is_stale:
+                assert "SWEEP_STALE" in fl, f"Expected SWEEP_STALE in flags for {c['case_id']}"
+                sweep_stale_cnt += 1
+            pb_val = (ev.get("sniper_metrics") or {}).get("pullback_leg_1h_pct")
+            if pb_val is not None and pb_val > 100.0:
+                assert "PULLBACK_BEYOND_LEG" in fl, f"Expected PULLBACK_BEYOND_LEG in flags for {c['case_id']}"
+                pb_beyond_cnt += 1
 
         # 3. Measure isolated build_evidence CPU time
         t0 = time.perf_counter()
@@ -118,6 +132,7 @@ def main() -> None:
     print(f"Neutrality check        : {identical}/{total} identical (mismatches={len(mismatches)})")
     print(f"Evidence error count    : {len(ev_errors)}/{total}")
     print(f"build_evidence CPU time : mean={mean_ms:.3f} ms | median={p50_ms:.3f} ms | p95={p95_ms:.3f} ms | max={max_ms:.3f} ms")
+    print(f"New flags verified      : SWEEP_STALE={sweep_stale_cnt}, PULLBACK_BEYOND_LEG={pb_beyond_cnt}")
     print(f"Archetypes captured     : {list(sample_prompts.keys())}")
 
     assert len(mismatches) == 0, f"Neutrality violated: {mismatches[:3]}"

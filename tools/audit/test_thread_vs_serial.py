@@ -174,7 +174,10 @@ def test_fault_isolation_and_error_types() -> None:
     with patch.object(binance, "AsyncBinance", FakeAsyncBinance), patch.object(binance, "_eval_strategy", faulty_eval):
         async_res, async_radar_list, btc, stats, _ = asyncio.run(binance._scan_universe_async(cfg, None))
 
-    assert len(async_res) == 4, f"Expected 4 surviving setups out of 6, got {len(async_res)}"
+    surviving_syms = [r.symbol for r in async_res]
+    assert len(async_res) == 5, f"Expected 5 setups (TEST04USDT st_old retained), got {len(async_res)}"
+    assert "TEST04USDT" in surviving_syms, "Expected TEST04USDT st_old to be retained when pass-2 derivative re-eval fails"
+    assert "TEST02USDT" not in surviving_syms, "TEST02USDT failed in pass-1 and should not be in results"
     assert stats["errors"] == 2, f"Expected stats['errors']==2, got {stats['errors']}"
     assert stats["error_types"] == {"ValueError": 1, "RuntimeError": 1}, f"Unexpected error_types: {stats['error_types']}"
 
@@ -183,7 +186,7 @@ def test_fault_isolation_and_error_types() -> None:
 
     rep = binance.build_report(async_res, cfg, "2026-11-15 09:00:00", btc, stats, DummyArgs(), elapsed_s=1.2, radar_hits=async_radar_list)
     assert "2 gagal data: ValueError=1, RuntimeError=1" in rep, "Missing error_types summary in build_report output"
-    print(f"[PASS] Fault isolation & error_types verified: stats={stats}")
+    print(f"[PASS] Fault isolation & st_old retention verified: surviving={len(async_res)}, TEST04USDT retained={('TEST04USDT' in surviving_syms)}, stats={stats}")
 
 
 if __name__ == "__main__":

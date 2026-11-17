@@ -919,8 +919,9 @@ async def _scan_universe_async(cfg: Config, only: Optional[List[str]]) -> Tuple[
                     ename = type(st_new).__name__
                     error_types[ename] += 1
                     print(f"  [{st_old.symbol}] gagal ({ename}): {st_new}", file=sys.stderr)
-                    continue
-                final_st = st_new if st_new is not None else st_old
+                    final_st = st_old
+                else:
+                    final_st = st_new if st_new is not None else st_old
                 results.append(final_st)
                 if final_st.symbol in radar_map:
                     radar_map[final_st.symbol].setup_status = final_st.status

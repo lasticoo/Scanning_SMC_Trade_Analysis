@@ -403,6 +403,12 @@ def build_evidence(
         flags.append(f"TP2_FAR_FROM_SWING_POOL({tp2_nearest_pool_dist_atr1h:.2f}xATR1H)")
     if reversal_metrics and reversal_metrics["sweep_failed"]:
         flags.append("SWEEP_EXTREME_BREACHED")
+    if (sw_info_1h["has_sweep"] and int(sw_info_1h["sweep_age_bars"] or 0) > 60) or (
+        sw_info_15m["has_sweep"] and int(sw_info_15m["sweep_age_bars"] or 0) > 60
+    ):
+        flags.append("SWEEP_STALE")
+    if sniper_metrics and sniper_metrics["pullback_leg_1h_pct"] > 100.0:
+        flags.append("PULLBACK_BEYOND_LEG")
     if pretap_metrics and pretap_metrics["approach_vel_atr15_per_bar"] >= 0.85:
         flags.append(f"FAST_APPROACH({pretap_metrics['approach_vel_atr15_per_bar']:.2f}ATR15/bar)")
 
