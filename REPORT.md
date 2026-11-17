@@ -201,7 +201,7 @@ Lingkungan pengujian:
 
 ## 3. Penyimpangan dari Spesifikasi
 
-Tidak ada. (Catatan: file referensi opsional `smc_update_develop2.patch` tidak tersedia di direktori kerja, sehingga seluruh fase diimplementasikan langsung di atas commit `2eeb6fd` sesuai spesifikasi).
+Fase 4 (logging JSONL per setup) dikerjakan atas instruksi langsung pemilik repo, di luar spesifikasi tertulis yang menahannya. Selain itu, file referensi opsional `smc_update_develop2.patch` tidak tersedia di direktori kerja, sehingga seluruh fase diimplementasikan langsung di atas commit `2eeb6fd` sesuai spesifikasi.
 
 ---
 
