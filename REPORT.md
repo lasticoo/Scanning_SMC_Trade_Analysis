@@ -21,6 +21,22 @@ Lingkungan pengujian:
 | **Fase 4** | `1bbb603` | `feat(logging): log per-setup evidence and Python/LLM status to JSONL` |
 | **Laporan Awal** | `8e92603` | `docs(audit): add comprehensive audit implementation report (REPORT.md)` |
 | **Refinement** | `43b7cd8` | `fix(audit): retain st_old on pass-2 error, add SWEEP_STALE/PULLBACK_BEYOND_LEG flags, and untrack pyc` |
+| **Update Laporan** | `25cfb0b` | `docs(audit): update REPORT.md with latest test outputs and remove §5.2` |
+| **Tugas A** | `16cd9cc` | `docs(report): clarify Phase 4 JSONL deviation in REPORT.md §3 (Tugas A)` |
+| **Tugas B** | `039f212` | `fix(evidence): require all present aligned sweeps to exceed per-TF age for SWEEP_STALE (Tugas B)` |
+| **Tugas C (Fase 5)** | `a249df5` | `feat(tracker): add Phase 5 JSONL evidence join and statistical performance report (Tugas C)` |
+
+### Output `git diff --stat 25cfb0b..a249df5`
+```text
+ REPORT.md                                   |   2 +-
+ scanner_core/evidence.py                    |  26 +-
+ scanner_core/evidence_report.py             | 484 ++++++++++++++++++++++++++++
+ scanner_core/tracker.py                     |  18 ++
+ tools/audit/test_evidence_report.py         | 272 ++++++++++++++++
+ tools/audit/test_neutrality_and_evidence.py |   8 +-
+ tools/audit/test_sweep_stale.py             |  92 ++++++
+ 7 files changed, 893 insertions(+), 9 deletions(-)
+```
 
 ### Output `git diff --stat 2eeb6fd..HEAD`
 ```text
@@ -199,22 +215,154 @@ Lingkungan pengujian:
 
 ---
 
+### TUGAS B — Perbaikan Flag `SWEEP_STALE` (`scanner_core/evidence.py`)
+- **Temuan Satuan `sweep_age_bars`**:
+  - Di `_causal_structure_state_machine(df, piv_len, tf_label)` ([evidence.py](file:///c:/Binance/scanner_core/evidence.py#L118-L153)), umur setiap event dihitung sebagai `age_bars = n - 1 - bar` menggunakan panjang array `df` pada timeframe masing-masing (`df1` untuk 1H, `df15` untuk 15M).
+  - Dengan demikian, `sw_info_1h["sweep_age_bars"]` bersatuan **bar 1H** (`1 bar = 1 jam`, sehingga `stale_1h_bars = 60` setara **60 jam**), sedangkan `sw_info_15m["sweep_age_bars"]` bersatuan **bar 15M** (`1 bar = 15 menit`, sehingga `stale_15m_bars = 96` setara **24 jam**).
+- **File & Fungsi yang diubah**:
+  - `scanner_core/evidence.py`: Menambahkan helper murni `_sweep_is_stale(sw_info_1h, sw_info_15m, stale_1h_bars=60, stale_15m_bars=96) -> bool` yang mengumpulkan seluruh sweep searah yang ada (`has_sweep=True`), mengembalikan `False` bila tidak ada sweep sama sekali, dan mengembalikan `True` **hanya jika SEMUA** sweep searah yang ada sudah lebih tua dari ambang timeframe-nya masing-masing (`1H > 60` bar, `15M > 96` bar).
+  - `tools/audit/test_sweep_stale.py`: Pengujian 4 kasus unit test wajib serta perbandingan frekuensi `SWEEP_STALE` sebelum vs sesudah pada 282 window sintetis.
+  - `tools/audit/test_neutrality_and_evidence.py`: Menyesuaikan verifikasi `SWEEP_STALE` dengan `_sweep_is_stale`.
+- **Perintah uji**:
+  ```powershell
+  python tools/audit/test_sweep_stale.py
+  python tools/audit/test_neutrality_and_evidence.py --phase1-json <scratch>/phase1_baseline.json --save-prompts <scratch>/prompt_examples.json
+  ```
+- **Output asli**:
+  ```text
+  [PASS] Case 1: (1H basi [85b > 60], 15M segar [12b <= 96]) -> False
+  [PASS] Case 2: (hanya 1H ada dan basi [85b > 60], 15M tidak ada) -> True
+  [PASS] Case 3: (1H [85b > 60] dan 15M [110b > 96] keduanya basi) -> True
+  [PASS] Case 4: (tidak ada sweep di 1H maupun 15M) -> False
+  [PASS] Synthetic 282 setups: SWEEP_STALE before=43/282 -> after=0/282 (evidence errors=0)
+  ```
+  ```text
+  === FASE 2 VERIFICATION SUMMARY ===
+  Neutrality check        : 282/282 identical (mismatches=0)
+  Evidence error count    : 0/282
+  build_evidence CPU time : mean=2.178 ms | median=1.569 ms | p95=5.775 ms | max=10.726 ms
+  New flags verified      : SWEEP_STALE=0, PULLBACK_BEYOND_LEG=29
+  Archetypes captured     : ['HTF_REVERSAL', 'TREND_CONT', 'PRE_REACTION']
+  [PASS] Prompt for HTF_REVERSAL contains '[BUKTI KUALITAS TAMBAHAN DARI PYTHON'
+  [PASS] Prompt for TREND_CONT contains '[BUKTI KUALITAS TAMBAHAN DARI PYTHON'
+  [PASS] Prompt for PRE_REACTION contains '[BUKTI KUALITAS TAMBAHAN DARI PYTHON'
+  ```
+- **Status Kriteria Tugas B**:
+  - 4 kasus unit test (`test_sweep_stale.py`): **LULUS**
+  - Netralitas terhadap HEAD sebelumnya: **282/282 (100% identik), error evidence = 0 — LULUS**
+  - Frekuensi `SWEEP_STALE` pada 282 setup sintetis: turun dari **`43/282` (sebelum)** menjadi **`0/282` (sesudah)** karena window yang memiliki sweep 1H tua (`> 60` bar) masih memiliki sweep 15M segar (`<= 96` bar).
+
+---
+
+### FASE 5 (TUGAS C) — Tracker Membaca JSONL & Melaporkan Performa per Bukti
+- **File & Fungsi yang diubah**:
+  - `scanner_core/tracker.py`:
+    - **C1 (`eval_one`)**: Menambahkan 9 kolom *carry-through* di paling akhir dict hasil (`scan_utc, archetype, python_score, ai_confidence, ai_model, session, trend_4h, oi_chg_1h_pct, cvd_state`) tanpa mengubah urutan maupun nama 18 kolom asli (`signal_utc` s/d `source_file`) dan tanpa mengubah `simulate_trade_on_bars`.
+    - **C3 (`_track_signals_async`)**: Memanggil `res_df = enrich_trades(res_df, load_audit_jsonl(scan_dir))` dan menambahkan `build_evidence_report(res_df)` ke akhir `summary` di dalam blok `try/except` tahan-gagal sebelum menulis `tracker_trades.csv` dan `tracker_summary.txt`.
+  - `scanner_core/evidence_report.py`:
+    - `load_audit_jsonl(scan_dir, filename="setups_audit.jsonl") -> DataFrame`: Membaca JSONL secara toleran, melewati & menghitung baris rusak, mem-*flatten* kunci skalar `record["evidence"]` (kecuali `"text"`) menjadi kolom `ev_*`, menormalisasi `flags` menjadi `flag_names` (membuang isi tanda kurung, digabung `";"`), mempertahankan `python_status` & `llm_status`, serta mendeduplikasi `(scan_utc, symbol, direction)` dengan `keep="last"`.
+    - `enrich_trades(res_df, audit_df) -> DataFrame`: *Left join* pada `(scan_utc, symbol, direction)` tanpa menghilangkan atau menggandakan baris trade, menambahkan kolom boolean `evidence_joined` dan kolom hasil join di bagian akhir.
+    - `build_evidence_report(trades_df, min_n=30) -> str`: Menghitung metrik (`n`, `WR%`, interval kepercayaan Wilson 95%, `Avg R`, `Net R`, `Profit Factor`) pada trade berstatus *closed* (`TP2_FULL`, `TP1_BEP`, `LOSS_SL`, `TIME_EXIT`) untuk baseline keseluruhan, `archetype`, `session`, `ai_decision`, bucket `ai_confidence`, `ai_model`, `python_status`, `killzone` (ada vs tidak), keselarasan arah trade vs `BTC 4H`, bucket `ER 1H`, serta setiap flag (`"<flag> ADA"` vs `"<flag> TIDAK ADA"`), dilengkapi penanda `"(sampel kecil, jangan disimpulkan)"` bila `n < min_n` dan footer peringatan korelasi vs kausalitas.
+  - `tools/audit/test_evidence_report.py`: Pengujian *join* (baris rusak, duplikat, tanpa pasangan), akurasi statistik & Wilson 95% CI, kompatibilitas mundur tanpa JSONL, serta ketahanan terhadap exception.
+- **Perintah uji**:
+  ```powershell
+  python tools/audit/test_evidence_report.py <scratch>/sample_evidence_report.txt
+  ```
+- **Output asli**:
+  ```text
+  [Signal Tracker] Mengevaluasi 1 sinyal unik dari 1 file histori scan ...
+  [Signal Tracker] Mengevaluasi 1 sinyal unik dari 1 file histori scan ...
+  [PASS] Join test: corrupt lines skipped, duplicates keep='last', flag_names normalized, no rows lost/duplicated
+  [PASS] Wilson 95% CI for 8/20 wins = [21.88%, 61.34%]
+  [PASS] Statistics test: n, WR%, Wilson 95% CI, Avg R, Net R, PF match independent pandas calculations
+  [PASS] Backward compatibility test: legacy scan_*.csv without JSONL preserves original columns, outcome/realized_r, and summary text
+  [PASS] Fault tolerance test: exception in build_evidence_report caught cleanly with 1-line note
+  ```
+- **Status Kriteria Fase 5 (Tugas C)**: **LULUS**
+
+#### Panduan Singkat Penggunaan Laporan Bukti pada Tracker
+1. Jalankan pemindaian reguler (`python binance.py`) sehingga sistem menyimpan `scan_output/scan_*.csv` beserta catatan bukti objektif di `scan_output/setups_audit.jsonl`.
+2. Untuk mengevaluasi performa sinyal historis beserta rincian per bukti/flag, jalankan:
+   ```powershell
+   python binance.py --track --include-watchlist
+   ```
+3. Buka file `scan_output/tracker_summary.txt` dan baca blok **`EVIDENCE PERFORMANCE REPORT`** di bagian paling bawah laporan (atau periksa kolom `evidence_joined`, `ev_*`, dan `flag_names` di akhir `scan_output/tracker_trades.csv`).
+4. Perhatikan interval kepercayaan `Wilson95` dan penanda `(sampel kecil, jangan disimpulkan)` pada kelompok dengan `n < 30`.
+5. Angka Win Rate dan Expectancy R per bukti/flag baru bermakna secara statistik setelah sampel mencukupi (minimal puluhan trade *closed* per kelompok), dan hanya bersifat diagnostik bagi trader — tidak boleh langsung dijadikan filter/aturan otomatis.
+
+#### Contoh Keluaran `build_evidence_report` dari Data Sintetis
+```text
+============================================================================================================
+EVIDENCE PERFORMANCE REPORT (CLOSED TRADES: 35 | EVIDENCE JOINED: 35 | MIN SAMPEL: 30)
+============================================================================================================
+[0] BASELINE KESELURUHAN (CLOSED TRADES):
+  ALL_CLOSED                         | n=  35 | WR= 45.7% [Wilson95:  30.5%- 61.8%] | Avg R= +0.83R | Net R= +29.00R | PF= 2.53
+
+[1] PER ARCHETYPE:
+  HTF_REVERSAL                       | n=  15 | WR= 80.0% [Wilson95:  54.8%- 93.0%] | Avg R= +2.20R | Net R= +33.00R | PF=12.00  (sampel kecil, jangan disimpulkan)
+  TREND_CONT                         | n=  20 | WR= 20.0% [Wilson95:   8.1%- 41.6%] | Avg R= -0.20R | Net R=  -4.00R | PF= 0.75  (sampel kecil, jangan disimpulkan)
+
+[2] PER SESSION:
+  LONDON                             | n=  15 | WR= 80.0% [Wilson95:  54.8%- 93.0%] | Avg R= +2.20R | Net R= +33.00R | PF=12.00  (sampel kecil, jangan disimpulkan)
+  NY_OPEN                            | n=  20 | WR= 20.0% [Wilson95:   8.1%- 41.6%] | Avg R= -0.20R | Net R=  -4.00R | PF= 0.75  (sampel kecil, jangan disimpulkan)
+
+[3] PER AI DECISION:
+  APPROVED                           | n=  35 | WR= 45.7% [Wilson95:  30.5%- 61.8%] | Avg R= +0.83R | Net R= +29.00R | PF= 2.53
+
+[4] PER BUCKET AI CONFIDENCE (<70, 70-79, 80-89, >=90):
+  CONF_70-79                         | n=  20 | WR= 20.0% [Wilson95:   8.1%- 41.6%] | Avg R= -0.20R | Net R=  -4.00R | PF= 0.75  (sampel kecil, jangan disimpulkan)
+  CONF_80-89                         | n=  15 | WR= 80.0% [Wilson95:  54.8%- 93.0%] | Avg R= +2.20R | Net R= +33.00R | PF=12.00  (sampel kecil, jangan disimpulkan)
+
+[5] PER AI MODEL:
+  llama-3.3-70b-versatile            | n=  35 | WR= 45.7% [Wilson95:  30.5%- 61.8%] | Avg R= +0.83R | Net R= +29.00R | PF= 2.53
+
+[6] PER PYTHON STATUS:
+  ENTRY READY                        | n=  20 | WR= 20.0% [Wilson95:   8.1%- 41.6%] | Avg R= -0.20R | Net R=  -4.00R | PF= 0.75  (sampel kecil, jangan disimpulkan)
+  REVERSAL WATCH                     | n=  15 | WR= 80.0% [Wilson95:  54.8%- 93.0%] | Avg R= +2.20R | Net R= +33.00R | PF=12.00  (sampel kecil, jangan disimpulkan)
+
+[7] KILLZONE (ADA vs TIDAK ADA):
+  KILLZONE_ADA                       | n=  20 | WR= 20.0% [Wilson95:   8.1%- 41.6%] | Avg R= -0.20R | Net R=  -4.00R | PF= 0.75  (sampel kecil, jangan disimpulkan)
+  KILLZONE_TIDAK_ADA                 | n=  15 | WR= 80.0% [Wilson95:  54.8%- 93.0%] | Avg R= +2.20R | Net R= +33.00R | PF=12.00  (sampel kecil, jangan disimpulkan)
+
+[8] KESELARASAN ARAH TRADE vs BTC 4H:
+  SEARAH_BTC_4H                      | n=  15 | WR= 80.0% [Wilson95:  54.8%- 93.0%] | Avg R= +2.20R | Net R= +33.00R | PF=12.00  (sampel kecil, jangan disimpulkan)
+  BERLAWANAN_BTC_4H                  | n=  20 | WR= 20.0% [Wilson95:   8.1%- 41.6%] | Avg R= -0.20R | Net R=  -4.00R | PF= 0.75  (sampel kecil, jangan disimpulkan)
+
+[9] PER BUCKET EFFICIENCY RATIO 1H (<0.20, 0.20-0.35, >=0.35):
+  ER1H_<0.20                         | n=  20 | WR= 20.0% [Wilson95:   8.1%- 41.6%] | Avg R= -0.20R | Net R=  -4.00R | PF= 0.75  (sampel kecil, jangan disimpulkan)
+  ER1H_>=0.35                        | n=  15 | WR= 80.0% [Wilson95:  54.8%- 93.0%] | Avg R= +2.20R | Net R= +33.00R | PF=12.00  (sampel kecil, jangan disimpulkan)
+
+[10] PER FLAG BUKTI (FLAG ADA vs FLAG TIDAK ADA):
+  CAUSAL_4H_OPPOSITE ADA             | n=  20 | WR= 20.0% [Wilson95:   8.1%- 41.6%] | Avg R= -0.20R | Net R=  -4.00R | PF= 0.75  (sampel kecil, jangan disimpulkan)
+  CAUSAL_4H_OPPOSITE TIDAK ADA       | n=  15 | WR= 80.0% [Wilson95:  54.8%- 93.0%] | Avg R= +2.20R | Net R= +33.00R | PF=12.00  (sampel kecil, jangan disimpulkan)
+  PULLBACK_BEYOND_LEG ADA            | n=  20 | WR= 20.0% [Wilson95:   8.1%- 41.6%] | Avg R= -0.20R | Net R=  -4.00R | PF= 0.75  (sampel kecil, jangan disimpulkan)
+  PULLBACK_BEYOND_LEG TIDAK ADA      | n=  15 | WR= 80.0% [Wilson95:  54.8%- 93.0%] | Avg R= +2.20R | Net R= +33.00R | PF=12.00  (sampel kecil, jangan disimpulkan)
+------------------------------------------------------------------------------------------------------------
+Footer: Korelasi bukan kausalitas; banyak perbandingan menghasilkan temuan palsu; jangan dijadikan aturan otomatis.
+============================================================================================================
+```
+
+---
+
 ## 3. Penyimpangan dari Spesifikasi
 
-Fase 4 (logging JSONL per setup) dikerjakan atas instruksi langsung pemilik repo, di luar spesifikasi tertulis yang menahannya. Selain itu, file referensi opsional `smc_update_develop2.patch` tidak tersedia di direktori kerja, sehingga seluruh fase diimplementasikan langsung di atas commit `2eeb6fd` sesuai spesifikasi.
+Fase 4 (logging JSONL per setup) dikerjakan atas instruksi langsung pemilik repo, di luar spesifikasi tertulis yang menahannya. Selain itu, file referensi opsional `smc_update_develop2.patch` tidak tersedia di direktori kerja, sehingga seluruh fase diimplementasikan langsung di atas commit `2eeb6fd` sesuai spesifikasi. Untuk Tugas A, Tugas B, dan Tugas C (Fase 5), penyimpangan dari spesifikasi: **tidak ada**.
 
 ---
 
 ## 4. Hal yang Tidak Bisa Diuji di Lingkungan Ini
 
-1. **Pemindaian Live ke Endpoint REST/WebSocket Binance (`AsyncBinance` / `watch_setups_realtime`)**: Sesuai aturan mutlak ke-4, pemindaian live tidak dijalankan dan `.env` tidak disentuh; pengujian jalur async dilakukan menggunakan mock `AsyncBinance` deterministik di `tools/audit/test_thread_vs_serial.py`.
+1. **Pemindaian Live ke Endpoint REST/WebSocket Binance (`AsyncBinance` / `watch_setups_realtime`)**: Sesuai aturan mutlak, pemindaian live tidak dijalankan dan `.env` tidak disentuh; pengujian jalur async dilakukan menggunakan mock `AsyncBinance` deterministik di `tools/audit/test_thread_vs_serial.py`.
 2. **Respons Kurasi Live dari API Groq LLM (`audit_top_setups`)**: Tidak memanggil API eksternal Groq; pengujian integrasi dilakukan dengan memverifikasi output `build_full_llm_smc_prompt` secara langsung untuk ketiga archetype dan mensimulasikan hasil kurasi LLM pada pengujian JSONL.
+3. **Eksekusi Tracker (`--track`) terhadap Histori Candle Masa Depan Live dari Binance**: Pengujian `_track_signals_async` di `tools/audit/test_evidence_report.py` menggunakan mock `AsyncBinance` dengan data bar masa depan deterministik, bukan menarik kline live dari endpoint Binance.
 
 ---
 
 ## 5. Temuan Baru / Risiko yang Terlihat Selama Audit (Dilaporkan Tanpa Diubah)
 
 1. **Mutasi `s.status` dan `s.score` secara *in-place* oleh `ai_validator.audit_top_setups`**: Sebelum Fase 4 menyimpan `py_status_map`, status asli dari mesin Python langsung ditimpa oleh `s.status = res["status"]` tanpa menyimpan atribut `s.python_status` pada dataclass `Setup` (berbeda dengan `s.python_score` yang sudah ada di `Setup`).
+2. **Deduplikasi Jendela 4 Jam di `_track_signals_async` Menggunakan Sinyal Pertama (`scan_utc` paling awal)**: Di `scanner_core/tracker.py` (baris 343–351), deduplikasi sinyal berulang dalam jendela 4 jam menyimpan baris pertama yang muncul (`scan_utc` paling awal), sehingga ketika di-*join* dengan `setups_audit.jsonl` pada `(scan_utc, symbol, direction)`, bukti yang terhubung adalah kondisi saat sinyal pertama kali muncul dalam jendela 4 jam tersebut.
+3. **Metrik Spesifik Archetype di `evidence` Bersifat *Nested Dict***: Di `setups_audit.jsonl`, metrik spesifik archetype (`reversal_metrics`, `sniper_metrics`, `pretap_metrics`) tersimpan sebagai sub-dict di dalam `record["evidence"]`, sehingga aturan *flattening* kunci skalar (`int/float/bool/str`) di `load_audit_jsonl` hanya mem-*flatten* metrik level-atas (`ev_er_1h_24`, `ev_killzone_utc`, `ev_poi_visits_24h`, dll.), sementara kondisi ekstrem dari sub-dict tersebut tetap tertangkap melalui kolom `flag_names` (`PULLBACK_BEYOND_LEG`, `SWEEP_EXTREME_BREACHED`, `FAST_APPROACH`).
 
 ---
 
@@ -408,7 +556,7 @@ Python bertugas sebagai tracker, penemu struktur objektif, dan pengukur geometri
 - Efficiency Ratio: 1H(24b)=0.32, 15M(32b)=0.09 | Killzone: OFF_KILLZONE (17:00 UTC) | BTC: 4H=BEARISH, 1H=BEARISH
 - Pool Likuiditas Target: 1H@43.0398(RR 2.1), 1H@43.9682(RR 3.1), 1H@46.2470(RR 5.5), 1H@46.3446(RR 5.6) | Jarak TP2 ke Pool Terdekat: 0.00xATR1H
 - Khusus Pre-Tap: Kecepatan=0.12ATR15/bar | Range4Bar=1.63xATR15 | Vol(4/24)=0.54x | Likuiditas Antara Harga-POI=0
-- Flags Netral: SWEEP_STALE
+- Flags Netral: NONE
 
 [LEVEL & FIXED LIQUIDITY-PROTECTED SL (NO BEP)] Entry: 41.0814 (Batas Sweep-Entry: 40.3229) (POI: 40.4829 - 41.1871 | Menunggu Sentuhan)
 - SL Tetap: 40.1468 | Proteksi SL di balik: SL diamankan di balik Wick 1H OB (40.3229) — tahan Judas Swing | Checkpoint TP1: 43.0398 | Target Utama TP2: 43.9641 (RR 1:3.1, WAJIB >= 1:3.0) | TP3 Runner: 48.5585 (RR 1:8.0) | Tembok Lawan: 44.3505 | Invalidasi: Close 1H/15M menembus bawah SL struktural 40.1468 (di bawah zona POI 40.4829).
