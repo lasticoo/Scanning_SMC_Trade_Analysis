@@ -20,7 +20,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from ai_validator import build_full_llm_smc_prompt
-from scanner_core.evidence import build_evidence
+from scanner_core.evidence import _sweep_is_stale, build_evidence
 from scanner_core.models import Config
 from scanner_core.mtf_smc import analyze_smc_symbol
 from tools.audit.synth_data import iter_synthetic_windows
@@ -95,11 +95,9 @@ def main() -> None:
             ev_errors.append({"case_id": c["case_id"], "ev": ev})
         else:
             fl = ev.get("flags", [])
-            sw1_age = (ev.get("sweep_1h") or {}).get("sweep_age_bars")
-            sw15_age = (ev.get("sweep_15m") or {}).get("sweep_age_bars")
-            is_stale = (sw1_age is not None and sw1_age > 60) or (sw15_age is not None and sw15_age > 60)
+            is_stale = _sweep_is_stale(ev.get("sweep_1h"), ev.get("sweep_15m"))
+            assert ("SWEEP_STALE" in fl) == is_stale, f"Mismatch SWEEP_STALE in flags for {c['case_id']}"
             if is_stale:
-                assert "SWEEP_STALE" in fl, f"Expected SWEEP_STALE in flags for {c['case_id']}"
                 sweep_stale_cnt += 1
             pb_val = (ev.get("sniper_metrics") or {}).get("pullback_leg_1h_pct")
             if pb_val is not None and pb_val > 100.0:

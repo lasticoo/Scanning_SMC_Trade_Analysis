@@ -237,6 +237,28 @@ def _aligned_sweep_and_mss(st_machine: Dict[str, Any], d: int) -> Dict[str, Any]
     }
 
 
+def _sweep_is_stale(
+    sw_info_1h: Optional[Dict[str, Any]],
+    sw_info_15m: Optional[Dict[str, Any]],
+    stale_1h_bars: int = 60,
+    stale_15m_bars: int = 96,
+) -> bool:
+    """
+    Kembalikan True hanya jika ada minimal satu sweep searah (has_sweep=True) dan
+    SEMUA sweep searah yang ada sudah lebih tua dari ambang TF-nya sendiri:
+    - 1H: sweep_age_bars > stale_1h_bars (default 60 bar 1H = 60 jam)
+    - 15M: sweep_age_bars > stale_15m_bars (default 96 bar 15M = 24 jam)
+    """
+    checks: List[bool] = []
+    if isinstance(sw_info_1h, dict) and sw_info_1h.get("has_sweep") and sw_info_1h.get("sweep_age_bars") is not None:
+        checks.append(int(sw_info_1h["sweep_age_bars"]) > stale_1h_bars)
+    if isinstance(sw_info_15m, dict) and sw_info_15m.get("has_sweep") and sw_info_15m.get("sweep_age_bars") is not None:
+        checks.append(int(sw_info_15m["sweep_age_bars"]) > stale_15m_bars)
+    if not checks:
+        return False
+    return all(checks)
+
+
 def build_evidence(
     setup: Any,
     df4: Optional[pd.DataFrame],
@@ -403,9 +425,7 @@ def build_evidence(
         flags.append(f"TP2_FAR_FROM_SWING_POOL({tp2_nearest_pool_dist_atr1h:.2f}xATR1H)")
     if reversal_metrics and reversal_metrics["sweep_failed"]:
         flags.append("SWEEP_EXTREME_BREACHED")
-    if (sw_info_1h["has_sweep"] and int(sw_info_1h["sweep_age_bars"] or 0) > 60) or (
-        sw_info_15m["has_sweep"] and int(sw_info_15m["sweep_age_bars"] or 0) > 60
-    ):
+    if _sweep_is_stale(sw_info_1h, sw_info_15m):
         flags.append("SWEEP_STALE")
     if sniper_metrics and sniper_metrics["pullback_leg_1h_pct"] > 100.0:
         flags.append("PULLBACK_BEYOND_LEG")
