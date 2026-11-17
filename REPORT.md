@@ -344,17 +344,56 @@ Footer: Korelasi bukan kausalitas; banyak perbandingan menghasilkan temuan palsu
 
 ---
 
+### MODUL M01 — Atribusi Versi, Tracker Realistis, & Validitas Bukti (P0)
+- **File & Fungsi yang diubah**:
+  - `scanner_core/models.py`: Menambahkan `maker_fee_pct: float = 0.02`, `slippage_bps: float = 5.0`, `limit_pen_bps: float = 2.0` ke `Config` (seluruhnya dapat dinonaktifkan ke `0`).
+  - `binance.py`: Menambahkan `get_code_version()` (cache level modul dari `git rev-parse --short HEAD`, fallback `"nogit"`) dan `compute_cfg_hash(cfg)` (SHA1 10 karakter), menulis `code_version` & `cfg_hash` ke `results_to_df` (CSV scan) dan `append_setups_jsonl` (JSONL), menambahkan CLI `--hold-compare` & `--since-version`, serta menghapus pemaksaan `max(args.max_hold, 60.0)` pada `--track`.
+  - `scanner_core/tracker.py`:
+    - `simulate_trade_on_bars`: Mendukung `maker_fee_pct=0.02`, `slippage_bps=5.0`, `limit_pen_bps=2.0`, default `max_hold_hours=30.0`, menyeragamkan `fee_r` sebelum/sesudah fill, dan mengurangi `slip_r` pada seluruh outcome `LOSS_SL`.
+    - `_track_signals_async` & `run_signal_tracker`: Mengambil default dari `Config()` (`30h`), menghitung `fetch_errors` (outcome `"FETCH_ERROR"`, bukan `"NO_DATA"`) serta `csv_errors` dan menampilkannya di ringkasan & `stderr`, mendukung `--hold-compare` (30h vs 60h berdampingan) dan `--since-version <sha>`.
+    - `_build_metrics_summary`: Menambahkan baris `Performa ex-top10` dan `TP2 realized vs planned` (`median(planned_rr - realized_r)` pada `TP2_FULL`), plus tampilan `Fetch Error` dan `CSV Rusak`.
+  - `scanner_core/evidence_report.py`: Membawa `code_version` (default `"legacy"`) & `cfg_hash` dari JSONL join, menambahkan `version_matches` & `filter_trades_by_version`, serta menampilkan `EX_TOP10` dan `TP2 realized vs planned` pada ringkasan bukti.
+  - `tools/audit/test_tracker_realism.py`: Unit test baru untuk penetrasi limit `2 bps`, hitungan manual `-1 - fee_r - slip_r`, regresi parameter nol, `FETCH_ERROR`/CSV rusak/`--hold-compare`/`--since-version`, serta `code_version`/`cfg_hash`.
+  - `tools/audit/test_evidence_report.py`: Menyesuaikan ekspektasi default `Max Hold: 30h` (`Config.max_hold_hours`).
+- **Perintah uji**:
+  ```powershell
+  python -m compileall scanner_core binance.py tools/audit
+  python tools/audit/test_tracker_realism.py
+  python tools/audit/test_evidence_report.py
+  python tools/audit/test_sweep_stale.py
+  python tools/audit/test_ob_mitigation.py
+  python tools/audit/test_jsonl_logging.py
+  python tools/audit/test_thread_vs_serial.py
+  python tools/audit/test_neutrality_and_evidence.py --phase1-json <scratch>/phase1_baseline.json
+  ```
+- **Output asli baseline realistis pada `scan_output/` (`scan_output/tracker_summary_baseline_realistic.txt`, `tracker_summary.txt` lama tetap utuh)**:
+  - **Dengan `--include-watchlist --hold-compare` (329 sinyal unik dari 39 `scan_*.csv`, 218 closed, Fetch Error: 0)**:
+    - **Hold 30h (default realistis)**: WR `45.4%` (`56 Full TP2 [25.7%], 112 SL, 50 Time-Exit`), Net Return **`+72.80 R`**, Expectancy **`+0.33 R/trade`**, Profit Factor `1.61`, **`ex-top10` (`n=208`): Net `+25.48 R`, Expectancy `+0.12 R/trade`** (Top-10 menyumbang `+47.32 R`), **`TP2 realized vs planned (n=56)`: `median(planned_rr - realized_r) = +0.024 R`** (Median Planned `2.27R` vs Realized `2.43R`), Max DD `18.90 R`.
+    - **Hold 60h (pembanding)**: WR `39.4%` (`75 Full TP2 [34.4%], 129 SL, 14 Time-Exit`), Net Return `+76.95 R`, Expectancy `+0.35 R/trade`, `ex-top10` (`n=208`): Net `+29.50 R` (`+0.14 R/trade`), `TP2 realized vs planned (n=75)`: `+0.027 R` (Median Planned `2.35R` vs Realized `2.50R`). Selisih jendela jam 30–60: `TP2 +19`, Net Return `+4.15 R`, Expectancy `+0.02 R`.
+    - **Catatan khusus 30h per jenis**: `SMC_REVERSAL` (`n=42`, WR `54.8%`, `+48.65 R`, PF `3.59`); `SMC_SNIPER` (`n=40`, WR `35.0%`, `-5.12 R`, PF `0.80`); `SMC_PRE_TAP` (`n=14`, WR `50.0%`, `-1.11 R`, PF `0.85`).
+  - **Khusus `ENTRY READY` saja (`include_watchlist=False`, 63 unik, 62 closed at 30h)**: WR `35.5%` (`10 TP2, 37 SL, 15 Time-Exit`), Net `-4.22 R`, Expectancy `-0.07 R/trade`, `ex-top10` (`n=52`): Net **`-29.96 R` (`-0.58 R/trade`)**, `TP2 realized vs planned (n=10)`: `+0.057 R`.
+- **Status Kriteria M01**:
+  - `code_version` & `cfg_hash` hadir di CSV scan & JSONL: **LULUS**
+  - Limit penetration (`2 bps`), maker/taker fees, SL slippage (`5 bps`), & regresi parameter nol: **LULUS**
+  - Default `max_hold_hours=30h` dari `Config` & `--hold-compare` (30h vs 60h): **LULUS**
+  - `FETCH_ERROR` & error CSV terhitung di ringkasan/stderr & dikecualikan dari closed trades: **LULUS**
+  - `ex-top10`, `TP2 realized vs planned`, `--since-version` + label `"legacy"`: **LULUS**
+  - Baseline realistis `scan_output/tracker_summary_baseline_realistic.txt` tersimpan tanpa menimpa `tracker_summary.txt`: **LULUS**
+
+---
+
 ## 3. Penyimpangan dari Spesifikasi
 
-Fase 4 (logging JSONL per setup) dikerjakan atas instruksi langsung pemilik repo, di luar spesifikasi tertulis yang menahannya. Selain itu, file referensi opsional `smc_update_develop2.patch` tidak tersedia di direktori kerja, sehingga seluruh fase diimplementasikan langsung di atas commit `2eeb6fd` sesuai spesifikasi. Untuk Tugas A, Tugas B, dan Tugas C (Fase 5), penyimpangan dari spesifikasi: **tidak ada**.
+- **Fase 4**: Logging JSONL per setup dikerjakan atas instruksi langsung pemilik repo, di luar spesifikasi tertulis awal yang menahannya. Selain itu, file referensi opsional `smc_update_develop2.patch` dan `audit_report.md` tidak tersedia di direktori kerja, sehingga seluruh implementasi mengacu langsung ke spesifikasi tertulis dan kondisi kode `2eeb6fd`..`412fbdc`.
+- **MODUL M01 (catatan parameter nol pada order limit)**: Pada `simulate_trade_on_bars` mengikuti rumus `entry_fee_pct = maker_fee_pct bila require_limit_tap else fee_pct`, nilai `maker_fee_pct=0` pada order limit berarti `0%` fee maker masuk; untuk meniru biaya taker+taker model lama pada order limit dapat digunakan `maker_fee_pct=fee_pct, slippage_bps=0, limit_pen_bps=0` (sedangkan untuk market entry `require_limit_tap=False`, nilai nol `maker_fee_pct=0, slippage_bps=0, limit_pen_bps=0` langsung identik dengan model lama).
+- Untuk Tugas A, Tugas B, dan Tugas C (Fase 5): tidak ada penyimpangan.
 
 ---
 
 ## 4. Hal yang Tidak Bisa Diuji di Lingkungan Ini
 
-1. **Pemindaian Live ke Endpoint REST/WebSocket Binance (`AsyncBinance` / `watch_setups_realtime`)**: Sesuai aturan mutlak, pemindaian live tidak dijalankan dan `.env` tidak disentuh; pengujian jalur async dilakukan menggunakan mock `AsyncBinance` deterministik di `tools/audit/test_thread_vs_serial.py`.
+1. **Pemindaian Live Universe & WebSocket (`AsyncBinance` full universe / `watch_setups_realtime`)**: Pemindaian pasar live tidak dijalankan dan `.env` tidak disentuh; pengujian jalur async dilakukan menggunakan mock `AsyncBinance` deterministik di `tools/audit/test_thread_vs_serial.py`. (Catatan: pada M01, `--track` historis terhadap `scan_output/` telah dijalankan menggunakan endpoint kline publik Binance untuk menghasilkan `scan_output/tracker_summary_baseline_realistic.txt` tanpa kunci API/order).
 2. **Respons Kurasi Live dari API Groq LLM (`audit_top_setups`)**: Tidak memanggil API eksternal Groq; pengujian integrasi dilakukan dengan memverifikasi output `build_full_llm_smc_prompt` secara langsung untuk ketiga archetype dan mensimulasikan hasil kurasi LLM pada pengujian JSONL.
-3. **Eksekusi Tracker (`--track`) terhadap Histori Candle Masa Depan Live dari Binance**: Pengujian `_track_signals_async` di `tools/audit/test_evidence_report.py` menggunakan mock `AsyncBinance` dengan data bar masa depan deterministik, bukan menarik kline live dari endpoint Binance.
 
 ---
 

@@ -52,6 +52,9 @@ class Config:
     min_sl_pct_major: float = 0.0075  # 0.75% floor untuk BTC/ETH
     min_sl_pct_alt: float = 0.0110    # 1.10% floor untuk altcoin & high-beta futures
     max_hold_hours: float = 30.0    # batas ideal durasi posisi agar tidak hold terlalu lama
+    maker_fee_pct: float = 0.02     # fee maker untuk limit entry (%)
+    slippage_bps: float = 5.0       # estimasi slippage stop-market saat terkena SL (bps)
+    limit_pen_bps: float = 2.0      # penetrasi minimum menembus harga limit agar antrian terisi (bps)
     mm_factor: float = 1.0
     min_rr: float = 3.0             # wajib R:R efektif minimal 1:3.0 (jika kurang -> REJECT)
     fixed_sl_no_bep: bool = True    # Set-and-Forget SL di balik likuiditas (pantang geser SL ke BEP)

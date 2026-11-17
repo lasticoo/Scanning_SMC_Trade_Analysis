@@ -30,10 +30,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import datetime as dt
+import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -579,7 +582,43 @@ def build_report(
     return "\n".join(out)
 
 
-def results_to_df(results: list, scan_ts: str) -> pd.DataFrame:
+_CODE_VERSION_CACHE: Optional[str] = None
+
+
+def get_code_version() -> str:
+    """Ambil git short SHA (dicache di level modul agar subprocess tidak dipanggil per baris)."""
+    global _CODE_VERSION_CACHE
+    if _CODE_VERSION_CACHE is not None:
+        return _CODE_VERSION_CACHE
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)) or ".",
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            text=True,
+        ).strip()
+        _CODE_VERSION_CACHE = out if out else "nogit"
+    except Exception:
+        _CODE_VERSION_CACHE = "nogit"
+    return _CODE_VERSION_CACHE
+
+
+def compute_cfg_hash(cfg: Optional[Config] = None) -> str:
+    """Hitung SHA1 10 karakter dari dataclasses.asdict(cfg) untuk atribusi konfigurasi."""
+    if cfg is not None and dataclasses.is_dataclass(cfg):
+        c_dict = dataclasses.asdict(cfg)
+    elif isinstance(cfg, dict):
+        c_dict = cfg
+    else:
+        c_dict = dataclasses.asdict(Config())
+    payload = json.dumps(c_dict, sort_keys=True, default=str)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
+
+
+def results_to_df(results: list, scan_ts: str, cfg: Optional[Config] = None) -> pd.DataFrame:
+    code_ver = get_code_version()
+    cfg_h = compute_cfg_hash(cfg)
     rows = []
     for r in results:
         row = {
@@ -677,6 +716,8 @@ def results_to_df(results: list, scan_ts: str) -> pd.DataFrame:
             row["smc_poi"] = el.get("poi", "")
         for name, val, _ in r.parts:
             row[f"score_{name}"] = round(val, 1)
+        row["code_version"] = code_ver
+        row["cfg_hash"] = cfg_h
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -699,6 +740,7 @@ def append_setups_jsonl(
     out_dir: str,
     py_status_map: Optional[Dict[int, str]] = None,
     filename: str = "setups_audit.jsonl",
+    cfg: Optional[Config] = None,
 ) -> str:
     """
     Mencatat satu baris JSON per setup (waktu, simbol, archetype, status Python,
@@ -707,6 +749,8 @@ def append_setups_jsonl(
     """
     os.makedirs(out_dir, exist_ok=True)
     jsonl_path = os.path.join(out_dir, filename)
+    code_ver = get_code_version()
+    cfg_h = compute_cfg_hash(cfg)
     with open(jsonl_path, "a", encoding="utf-8") as fh:
         for r in results:
             raw_md = getattr(r, "raw_market_data", {}) or {}
@@ -723,6 +767,8 @@ def append_setups_jsonl(
                 "scan_utc": scan_ts,
                 "signal_candle_utc": getattr(r, "candle_time", ""),
                 "last_closed_candle_utc": getattr(r, "last_candle", ""),
+                "code_version": code_ver,
+                "cfg_hash": cfg_h,
                 "tracker_key": f"{r.symbol}|{r.direction}|{getattr(r, 'candle_time', '')}",
                 "symbol": r.symbol,
                 "direction": r.direction,
@@ -1081,8 +1127,8 @@ def run_scan(cfg: Config, args, sent: set) -> list:
     stamp = dt.datetime.fromtimestamp(server_ms / 1000, dt.timezone.utc).strftime("%Y%m%d_%H%M")
     csv_path = os.path.join(args.out, f"scan_{stamp}.csv")
     if results:
-        results_to_df(results, scan_ts).sort_values("score", ascending=False).to_csv(csv_path, index=False)
-        jsonl_path = append_setups_jsonl(results, scan_ts, args.out, py_status_map=py_status_map)
+        results_to_df(results, scan_ts, cfg=cfg).sort_values("score", ascending=False).to_csv(csv_path, index=False)
+        jsonl_path = append_setups_jsonl(results, scan_ts, args.out, py_status_map=py_status_map, cfg=cfg)
         print(f"\nHasil disimpan: {csv_path} (JSONL audit: {jsonl_path})")
     if radar_hits and cfg.radar_mode:
         radar_csv = os.path.join(args.out, f"radar_{stamp}.csv")
@@ -1110,7 +1156,7 @@ def main() -> None:
     p.add_argument("--risk-pct", type=float, default=1.0, help="risiko per trade (%% dari equity)")
     p.add_argument("--fee-pct", type=float, default=0.04, help="fee per sisi (%%)")
     p.add_argument("--min-score", type=int, default=0, help="override score minimal ENTRY READY (default 70 SMC, 80 breakout)")
-    p.add_argument("--max-hold", type=float, default=Config.max_hold_hours, help="batas ideal durasi posisi dalam jam (default 36)")
+    p.add_argument("--max-hold", type=float, default=Config.max_hold_hours, help="batas ideal durasi posisi dalam jam (default 30)")
     p.add_argument("--recent-bars", type=int, default=Config.event_recent_bars, help="event aktif N bar 15M terakhir")
     p.add_argument("--workers", type=int, default=Config.workers, help="konkurensi koneksi async/worker")
     p.add_argument("--sync", action="store_true", help="gunakan mode HTTP sinkron klasik (tanpa aiohttp)")
@@ -1137,6 +1183,8 @@ def main() -> None:
     # Mode Evaluasi Performa & Backtester
     p.add_argument("--track", action="store_true", help="evaluasi performa aktual seluruh sinyal histori di scan_output/*.csv")
     p.add_argument("--include-watchlist", action="store_true", help="sertakan sinyal PRE-TAP LIMIT, REVERSAL WATCH, & WATCHLIST saat --track")
+    p.add_argument("--hold-compare", action="store_true", help="bandingkan evaluasi tracker horizon 30h vs 60h berdampingan")
+    p.add_argument("--since-version", type=str, default="", help="filter evaluasi tracker hanya untuk sinyal dengan code_version (git short sha) tertentu")
     p.add_argument("--backtest", action="store_true", help="jalankan Walk-Forward Backtest historis mesin Top-Down MTF")
     p.add_argument("--days", type=int, default=14, help="jumlah hari pengujian historis untuk --backtest (default 14)")
     p.add_argument("--bt-top", type=int, default=12, help="jumlah pair likuid teratas untuk --backtest jika --symbols kosong")
@@ -1173,9 +1221,14 @@ def main() -> None:
     if args.track:
         summary, _ = run_signal_tracker(
             scan_dir=args.out,
-            max_hold_hours=max(args.max_hold, 60.0),
+            max_hold_hours=args.max_hold,
             include_watchlist=args.include_watchlist,
             fee_pct=args.fee_pct,
+            maker_fee_pct=cfg.maker_fee_pct,
+            slippage_bps=cfg.slippage_bps,
+            limit_pen_bps=cfg.limit_pen_bps,
+            hold_compare=args.hold_compare,
+            since_version=args.since_version,
         )
         print(summary)
         return

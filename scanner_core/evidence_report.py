@@ -13,12 +13,14 @@ import json
 import math
 import os
 import re
+import subprocess
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
 
 CLOSED_OUTCOMES = ("TP2_FULL", "TP1_BEP", "LOSS_SL", "TIME_EXIT")
+_VERSION_MATCH_CACHE: Dict[Tuple[str, str], bool] = {}
 
 
 def _normalize_flag_name(raw_flag: str) -> str:
@@ -106,12 +108,16 @@ def load_audit_jsonl(scan_dir: str, filename: str = "setups_audit.jsonl") -> pd.
                     corrupt_lines += 1
                     continue
 
+                cv = str(rec.get("code_version") or "").strip()
+                ch = str(rec.get("cfg_hash") or "").strip()
                 flat: Dict[str, Any] = {
                     "scan_utc": scan_utc,
                     "symbol": symbol,
                     "direction": direction,
                     "python_status": rec.get("python_status"),
                     "llm_status": rec.get("llm_status"),
+                    "code_version": cv if cv else "legacy",
+                    "cfg_hash": ch,
                 }
 
                 ev = rec.get("evidence")
@@ -173,6 +179,10 @@ def enrich_trades(res_df: pd.DataFrame, audit_df: pd.DataFrame) -> pd.DataFrame:
     ):
         out = res_df.copy()
         out["evidence_joined"] = False
+        if "code_version" not in out.columns:
+            out["code_version"] = "legacy"
+        if "cfg_hash" not in out.columns:
+            out["cfg_hash"] = ""
         return out
 
     # Pastikan audit_df unik pada key_cols dan bebas dari scan_utc kosong
@@ -186,6 +196,10 @@ def enrich_trades(res_df: pd.DataFrame, audit_df: pd.DataFrame) -> pd.DataFrame:
     if aud.empty:
         out = res_df.copy()
         out["evidence_joined"] = False
+        if "code_version" not in out.columns:
+            out["code_version"] = "legacy"
+        if "cfg_hash" not in out.columns:
+            out["cfg_hash"] = ""
         return out
 
     # Hindari tabrakan nama kolom non-key yang sudah ada di res_df
@@ -217,12 +231,73 @@ def enrich_trades(res_df: pd.DataFrame, audit_df: pd.DataFrame) -> pd.DataFrame:
     valid_key_mask = (merged["_join_scan_utc"] != "") & (merged["_join_symbol"] != "") & (merged["_join_direction"] != "")
     merged["evidence_joined"] = merged["_audit_matched_flag"].notna() & valid_key_mask
 
+    if "code_version" in merged.columns:
+        merged["code_version"] = (
+            merged["code_version"].fillna("legacy").astype(str).str.strip().replace({"": "legacy", "nan": "legacy", "None": "legacy"})
+        )
+    else:
+        merged["code_version"] = "legacy"
+        if "code_version" not in orig_cols:
+            extra_cols.append("code_version")
+    if "cfg_hash" in merged.columns:
+        merged["cfg_hash"] = merged["cfg_hash"].fillna("").astype(str).str.strip().replace({"nan": "", "None": ""})
+
     drop_temp = ["_join_scan_utc", "_join_symbol", "_join_direction", "_audit_matched_flag"]
     merged = merged.drop(columns=drop_temp)
 
     # Pastikan urutan kolom: orig_cols tetap identik di depan, diikuti evidence_joined dan extra_cols di akhir
     final_cols = orig_cols + ["evidence_joined"] + [c for c in extra_cols if c in merged.columns]
     return merged[final_cols]
+
+
+def version_matches(code_ver: str, since_version: str) -> bool:
+    """
+    Cek apakah code_version sebuah baris cocok dengan filter `--since-version <sha>`:
+    - Baris tanpa versi ("legacy" / "nogit") tidak lolos filter SHA nyata.
+    - Cocok persis (case-insensitive) atau prefix SHA >= 4 karakter, atau
+    - Jika keduanya adalah commit git valid, lolos bila `since_version` merupakan ancestor dari `code_ver`.
+    """
+    sv = str(since_version or "").strip()
+    if not sv:
+        return True
+    cv = str(code_ver or "").strip() or "legacy"
+    key = (cv, sv)
+    if key in _VERSION_MATCH_CACHE:
+        return _VERSION_MATCH_CACHE[key]
+
+    res = False
+    if cv == sv:
+        res = True
+    elif cv in ("legacy", "nogit"):
+        res = False
+    elif len(sv) >= 4 and len(cv) >= 4 and (cv.lower().startswith(sv.lower()) or sv.lower().startswith(cv.lower())):
+        res = True
+    else:
+        try:
+            rc = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", sv, cv],
+                cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            ).returncode
+            res = rc == 0
+        except Exception:
+            res = False
+
+    _VERSION_MATCH_CACHE[key] = res
+    return res
+
+
+def filter_trades_by_version(df: pd.DataFrame, since_version: str) -> pd.DataFrame:
+    """Filter DataFrame berdasarkan kolom code_version menggunakan `version_matches`."""
+    sv = str(since_version or "").strip()
+    if not sv or df is None or df.empty:
+        return df
+    if "code_version" not in df.columns:
+        return df.iloc[0:0].copy()
+    mask = df["code_version"].apply(lambda v: version_matches(str(v), sv))
+    return df[mask].reset_index(drop=True)
 
 
 def _compute_stats(sub_df: pd.DataFrame) -> Dict[str, Any]:
@@ -344,6 +419,26 @@ def build_evidence_report(trades_df: pd.DataFrame, min_n: int = 30) -> str:
     base_st = _compute_stats(closed)
     lines.append("[0] BASELINE KESELURUHAN (CLOSED TRADES):")
     lines.append(_fmt_stat_row("ALL_CLOSED", base_st, min_n))
+    r_all = closed["realized_r"].to_numpy(dtype=float, copy=False)
+    if len(r_all) > 10:
+        r_ex10 = np.sort(r_all)[:-10]
+        lines.append(
+            f"  {'EX_TOP10':<34s} | n={len(r_ex10):>4d} | Expectancy={float(np.mean(r_ex10)):+6.2f}R | Net R={float(np.sum(r_ex10)):+7.2f}R"
+        )
+    else:
+        lines.append(
+            f"  {'EX_TOP10':<34s} | n={len(r_all):>4d} | <= 10 trade closed (butuh >10 untuk ex-top10)"
+        )
+    if "planned_rr" in closed.columns:
+        tp2_sub = closed[closed["outcome"] == "TP2_FULL"]
+        p_rr = pd.to_numeric(tp2_sub["planned_rr"], errors="coerce") if not tp2_sub.empty else pd.Series(dtype=float)
+        r_rr = pd.to_numeric(tp2_sub["realized_r"], errors="coerce") if not tp2_sub.empty else pd.Series(dtype=float)
+        valid_tp2 = p_rr.notna() & r_rr.notna()
+        if valid_tp2.any():
+            med_diff = float((p_rr[valid_tp2] - r_rr[valid_tp2]).median())
+            lines.append(
+                f"  {'TP2 realized vs planned':<34s} | n={int(valid_tp2.sum()):>4d} | median(planned_rr - realized_r) = {med_diff:+.3f} R"
+            )
 
     def _add_categorical_section(sec_title: str, col_name: str) -> None:
         lines.append(f"\n{sec_title}:")

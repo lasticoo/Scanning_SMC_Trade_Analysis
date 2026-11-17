@@ -241,12 +241,14 @@ def test_backward_compatibility_and_fault_tolerance() -> None:
         assert list(res_df.columns[18:27]) == new_carry_cols, f"Carry-through columns mismatch: {list(res_df.columns[18:27])}"
         assert res_df.columns[27] == "evidence_joined"
         assert bool(res_df.loc[0, "evidence_joined"]) is False
+        assert res_df.loc[0, "code_version"] == "legacy"
         assert res_df.loc[0, "outcome"] == "TP2_FULL"
         assert float(res_df.loc[0, "realized_r"]) == 2.96  # 0.5*1.5 + 0.5*3.0 - fee_r(0.04) -> 2.21 or set-and-forget 2.96
 
+        def_hold = tracker_mod.Config().max_hold_hours
         expected_base_summary = tracker_mod._build_metrics_summary(
             res_df[orig_18_cols],
-            f"SIGNAL PERFORMANCE TRACKER REPORT  |  Folder: {tmpdir}  |  Max Hold: 60h  |  Fixed SL (No BEP) -> Target Utama TP2 (>=1:3.0R)",
+            f"SIGNAL PERFORMANCE TRACKER REPORT  |  Folder: {tmpdir}  |  Max Hold: {def_hold:.0f}h  |  Fixed SL (No BEP) -> Target Utama TP2 (>=1:3.0R)",
         )
         assert summary_no_jsonl == expected_base_summary, "Summary text changed when no JSONL exists"
         print("[PASS] Backward compatibility test: legacy scan_*.csv without JSONL preserves original columns, outcome/realized_r, and summary text")
