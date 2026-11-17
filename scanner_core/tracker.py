@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from .breakout import analyze_symbol
+from .evidence_report import build_evidence_report, enrich_trades, load_audit_jsonl
 from .exchange_async import AsyncBinance
 from .indicators import htf_context
 from .models import NAN, Config, fp
@@ -410,6 +411,15 @@ async def _track_signals_async(
                 "realized_r": sim["realized_r"],
                 "hold_hours": sim["hold_hours"],
                 "source_file": row["_src_file"],
+                "scan_utc": row.get("scan_utc", ""),
+                "archetype": row.get("archetype", ""),
+                "python_score": row.get("python_score", NAN),
+                "ai_confidence": row.get("ai_confidence", NAN),
+                "ai_model": row.get("ai_model", ""),
+                "session": row.get("session", ""),
+                "trend_4h": row.get("trend_4h", ""),
+                "oi_chg_1h_pct": row.get("oi_chg_1h_pct", NAN),
+                "cvd_state": row.get("cvd_state", ""),
             }
 
         results = await asyncio.gather(*(eval_one(r) for _, r in uniq_df.iterrows()))
@@ -420,6 +430,14 @@ async def _track_signals_async(
         res_df,
         f"SIGNAL PERFORMANCE TRACKER REPORT  |  Folder: {scan_dir}  |  Max Hold: {max_hold_hours:.0f}h  |  Fixed SL (No BEP) -> Target Utama TP2 (>=1:3.0R)",
     )
+
+    try:
+        res_df = enrich_trades(res_df, load_audit_jsonl(scan_dir))
+        ev_report = build_evidence_report(res_df)
+        if ev_report:
+            summary = summary + "\n" + ev_report
+    except Exception as e:
+        summary = summary + f"\n[evidence report gagal: {type(e).__name__}: {e}]"
 
     os.makedirs(scan_dir, exist_ok=True)
     res_df.to_csv(os.path.join(scan_dir, "tracker_trades.csv"), index=False)
