@@ -19,20 +19,34 @@ Lingkungan pengujian:
 | **Fase 2** | `a91c3a2` | `feat(evidence): add objective evidence module for LLM curator` |
 | **Fase 3** | `0d43b4d` | `perf(async): offload CPU bundle and derivative pass to threads with error_types tracking` |
 | **Fase 4** | `1bbb603` | `feat(logging): log per-setup evidence and Python/LLM status to JSONL` |
+| **Laporan Awal** | `8e92603` | `docs(audit): add comprehensive audit implementation report (REPORT.md)` |
+| **Refinement** | `43b7cd8` | `fix(audit): retain st_old on pass-2 error, add SWEEP_STALE/PULLBACK_BEYOND_LEG flags, and untrack pyc` |
 
-### Output `git diff --stat 2eeb6fd..1bbb603`
+### Output `git diff --stat 2eeb6fd..HEAD`
 ```text
- ai_validator.py                             |   5 +-
- binance.py                                  | 156 ++++++++-
- scanner_core/evidence.py                    | 479 ++++++++++++++++++++++++++++
- scanner_core/mtf_smc.py                     |  67 ++--
- tools/audit/run_baseline.py                 | 127 ++++++++
- tools/audit/synth_data.py                   | 162 ++++++++++
- tools/audit/test_jsonl_logging.py           |  85 +++++
- tools/audit/test_neutrality_and_evidence.py | 141 ++++++++
- tools/audit/test_ob_mitigation.py           | 105 ++++++
- tools/audit/test_thread_vs_serial.py        | 192 +++++++++++
- 10 files changed, 1484 insertions(+), 35 deletions(-)
+ .gitignore                                         |  47 +-
+ REPORT.md                                          | 447 +++++++++++++++++++
+ __pycache__/binance.cpython-310.pyc                | Bin 45292 -> 0 bytes
+ ai_validator.py                                    |   5 +-
+ binance.py                                         | 159 ++++++-
+ scanner_core/__pycache__/__init__.cpython-310.pyc  | Bin 340 -> 0 bytes
+ scanner_core/__pycache__/breakout.cpython-310.pyc  | Bin 15137 -> 0 bytes
+ .../__pycache__/exchange_async.cpython-310.pyc     | Bin 12664 -> 0 bytes
+ .../__pycache__/indicators.cpython-310.pyc         | Bin 8871 -> 0 bytes
+ scanner_core/__pycache__/models.cpython-310.pyc    | Bin 9180 -> 0 bytes
+ scanner_core/__pycache__/mtf_smc.cpython-310.pyc   | Bin 84074 -> 0 bytes
+ scanner_core/__pycache__/tracker.cpython-310.pyc   | Bin 17831 -> 0 bytes
+ .../__pycache__/ws_watcher.cpython-310.pyc         | Bin 9536 -> 0 bytes
+ .../__pycache__/zone_radar.cpython-310.pyc         | Bin 29980 -> 0 bytes
+ scanner_core/evidence.py                           | 485 +++++++++++++++++++++
+ scanner_core/mtf_smc.py                            |  67 ++-
+ tools/audit/run_baseline.py                        | 127 ++++++
+ tools/audit/synth_data.py                          | 162 +++++++
+ tools/audit/test_jsonl_logging.py                  |  85 ++++
+ tools/audit/test_neutrality_and_evidence.py        | 156 +++++++
+ tools/audit/test_ob_mitigation.py                  | 105 +++++
+ tools/audit/test_thread_vs_serial.py               | 195 +++++++++
+ 22 files changed, 1960 insertions(+), 80 deletions(-)
 ```
 
 ---
@@ -77,7 +91,7 @@ Lingkungan pengujian:
 - **Perintah uji**:
   ```powershell
   python tools/audit/test_ob_mitigation.py
-  python tools/audit/run_baseline.py --save <scratch>/phase1_baseline.json
+  python tools/audit/run_baseline.py --compare <scratch>/phase1_baseline.json
   ```
 - **Output asli**:
   ```text
@@ -90,9 +104,10 @@ Lingkungan pengujian:
   Setups produced         : 282
   None returned           : 0
   Exceptions raised       : 0
-  Total elapsed time      : 10827.8 ms (38.40 ms/call)
+  Total elapsed time      : 7573.0 ms (26.85 ms/call)
   Archetype breakdown     : {'HTF_REVERSAL': 166, 'TREND_CONT': 115, 'PRE_REACTION': 1}
   Status breakdown        : {'REJECT': 243, 'REVERSAL WATCH': 33, 'ENTRY READY': 4, 'PRE-TAP LIMIT': 1, 'WATCHLIST': 1}
+  Neutrality comparison   : 282/282 identical on ('outcome', 'status', 'score', 'entry', 'sl', 'tp1', 'tp2', 'archetype')
   ```
 - **Status Kriteria Fase 1**:
   - Exception dari data acak turun dari `15` (`> 0`) menjadi `0`: **LULUS**
@@ -103,10 +118,10 @@ Lingkungan pengujian:
 
 ### FASE 2 — Modul Bukti Objektif untuk LLM (`scanner_core/evidence.py`)
 - **File & Fungsi yang diubah**:
-  - `scanner_core/evidence.py`: Modul baru (hanya bergantung stdlib + `numpy` + `pandas`) berisi `build_evidence(setup, df4, df1, df15, btc) -> dict` yang menghitung struktur kausal 4H/1H/15M (state machine 1x pakai), sweep searah + MSS/BOS sesudahnya, posisi range swing 1H, kunjungan POI 24 jam + umur kunjungan terakhir, Efficiency Ratio 1H(24b)/15M(32b), Killzone UTC, tren BTC 4H/1H, pool likuiditas target + RR + jarak TP2 dalam ATR1H, metrik khusus Reversal/Sniper/Pre-Tap, `flags` netral, dan blok `text` siap-prompt.
+  - `scanner_core/evidence.py`: Modul baru (hanya bergantung stdlib + `numpy` + `pandas`) berisi `build_evidence(setup, df4, df1, df15, btc) -> dict` yang menghitung struktur kausal 4H/1H/15M (state machine 1x pakai), sweep searah + MSS/BOS sesudahnya, posisi range swing 1H, kunjungan POI 24 jam + umur kunjungan terakhir, Efficiency Ratio 1H(24b)/15M(32b), Killzone UTC, tren BTC 4H/1H, pool likuiditas target + RR + jarak TP2 dalam ATR1H, metrik khusus Reversal/Sniper/Pre-Tap, `flags` netral (termasuk `SWEEP_STALE` bila sweep searah `> 60` bar dan `PULLBACK_BEYOND_LEG` bila pullback `> 100%`), dan blok `text` siap-prompt.
   - `scanner_core/mtf_smc.py`: Menambahkan `_safe_evidence(setup, df4, df1, df15, btc)` dan menyisipkan `best_setup.raw_market_data["evidence"] = _safe_evidence(...)` di akhir `analyze_smc_symbol` setelah `populate_forward_playbook`.
   - `ai_validator.py`: Menyisipkan `raw["evidence"]["text"]` tepat setelah baris `- Orderflow: ... | Funding: ...` di `build_full_llm_smc_prompt` tanpa mengubah bagian prompt lain.
-  - `tools/audit/test_neutrality_and_evidence.py`: Skrip verifikasi netralitas Fase 1 vs Fase 2, error count, benchmark latensi CPU `build_evidence`, dan pemeriksaan prompt ketiga archetype.
+  - `tools/audit/test_neutrality_and_evidence.py`: Skrip verifikasi netralitas Fase 1 vs Fase 2, error count, verifikasi flag `SWEEP_STALE` & `PULLBACK_BEYOND_LEG`, benchmark latensi CPU `build_evidence`, dan pemeriksaan prompt ketiga archetype.
 - **Perintah uji**:
   ```powershell
   python tools/audit/test_neutrality_and_evidence.py --phase1-json <scratch>/phase1_baseline.json --save-prompts <scratch>/prompt_examples.json
@@ -116,17 +131,19 @@ Lingkungan pengujian:
   === FASE 2 VERIFICATION SUMMARY ===
   Neutrality check        : 282/282 identical (mismatches=0)
   Evidence error count    : 0/282
-  build_evidence CPU time : mean=2.586 ms | median=1.659 ms | p95=6.015 ms | max=28.014 ms
+  build_evidence CPU time : mean=1.440 ms | median=1.022 ms | p95=3.101 ms | max=13.859 ms
+  New flags verified      : SWEEP_STALE=43, PULLBACK_BEYOND_LEG=29
   Archetypes captured     : ['HTF_REVERSAL', 'TREND_CONT', 'PRE_REACTION']
   [PASS] Prompt for HTF_REVERSAL contains '[BUKTI KUALITAS TAMBAHAN DARI PYTHON'
   [PASS] Prompt for TREND_CONT contains '[BUKTI KUALITAS TAMBAHAN DARI PYTHON'
   [PASS] Prompt for PRE_REACTION contains '[BUKTI KUALITAS TAMBAHAN DARI PYTHON'
+  Saved 3 archetype prompts to: C:\Users\lastico\.gemini\antigravity\brain\d923f922-d881-4ad9-8e6f-1a713c6f2b32\scratch\prompt_examples.json
   ```
 - **Status Kriteria Fase 2**:
   - Netralitas Fase 1 vs Fase 2 pada `(status, score, entry, sl, tp1, tp2, archetype)`: **282/282 (100% identik) — LULUS**
   - Semua setup memiliki `evidence` dengan `error is None`: **0/282 error — LULUS**
   - Prompt ketiga archetype memuat `[BUKTI KUALITAS TAMBAHAN DARI PYTHON`: **LULUS**
-  - Tambahan CPU per setup `< 5 ms`: **Rata-rata 2.586 ms (median 1.659 ms) — LULUS**
+  - Tambahan CPU per setup `< 5 ms`: **Rata-rata 1.440 ms (median 1.022 ms) — LULUS**
   - `evidence.py` hanya bergantung pada `numpy`/`pandas`/stdlib: **LULUS**
 
 ---
@@ -136,10 +153,10 @@ Lingkungan pengujian:
   - `binance.py`:
     - Menambahkan fungsi sinkron `_cpu_bundle(sym, df4, df1, df15, meta, cfg, btc, deriv=None, st_prev=None)` yang membungkus `htf_context`, `_eval_strategy`, dan `_compute_symbol_radar`.
     - Di `_scan_universe_async` (`worker_one`), memanggil `await asyncio.to_thread(_cpu_bundle, sym, df4, df1, df15, meta, cfg, btc)`. Penulisan ke `cached_bundles` dan `radar_map` tetap berada di event loop utama di luar thread.
-    - Pada pass kedua (re-evaluasi derivatif), menjalankan `_eval_strategy` paralel via `asyncio.to_thread` di dalam `await asyncio.gather(..., return_exceptions=True)` sehingga kegagalan satu simbol tidak menjatuhkan simbol lain dan dihitung sebagai error.
+    - Pada pass kedua (re-evaluasi derivatif), menjalankan `_eval_strategy` paralel via `asyncio.to_thread` di dalam `await asyncio.gather(..., return_exceptions=True)`: bila `_eval_strategy` gagal untuk satu simbol, `st_old` (setup hasil pass pertama) tetap dipertahankan di `results` dan kegagalan tetap dihitung sebagai error di `stats["errors"]` serta `stats["error_types"]`.
     - Menambahkan `error_types: Counter` ke dalam dict `stats` (`stats["error_types"]`), mencetak nama class exception pada pesan error per simbol serta ringkasan jenis error, dan menampilkannya secara kompatibel di `build_report`.
     - Jalur `--sync` (`_scan_universe_sync`) tidak diubah.
-  - `tools/audit/test_thread_vs_serial.py`: Pengujian kesamaan hasil eksekusi via thread vs serial serta isolasi kegagalan Pass 1 dan Pass 2.
+  - `tools/audit/test_thread_vs_serial.py`: Pengujian kesamaan hasil eksekusi via thread vs serial serta isolasi kegagalan Pass 1 dan Pass 2 (termasuk verifikasi bahwa `st_old` dipertahankan ketika Pass 2 gagal).
 - **Pemeriksaan State Global di Thread**:
   - `htf_context`, `_eval_strategy` (`analyze_smc_symbol` / `analyze_symbol`), dan `_compute_symbol_radar` (`extract_tf_structure` / `scan_live_zone_radar`) hanya membaca DataFrame/dict input dan konstanta (`MAJOR_SYMBOLS`, `NAN`) serta mengembalikan objek `Setup` dan `ZoneRadarHit` baru tanpa memutasi state global apa pun. Mutasi `cached_bundles` dan `radar_map` dilakukan di event loop sesudah `await asyncio.to_thread(...)` selesai.
 - **Perintah uji**:
@@ -158,7 +175,7 @@ Lingkungan pengujian:
     [TEST04USDT] gagal (RuntimeError): Simulated Pass-2 derivative re-eval failure
     ringkasan jenis error (2 total): ValueError=1, RuntimeError=1
   [PASS] Thread vs Serial 100% identical across 10 symbols (setups=10, radar_hits=10)
-  [PASS] Fault isolation & error_types verified: stats={'total': 6, 'liquid': 6, 'scanned': 4, 'errors': 2, 'error_types': {'ValueError': 1, 'RuntimeError': 1}}
+  [PASS] Fault isolation & st_old retention verified: surviving=5, TEST04USDT retained=True, stats={'total': 6, 'liquid': 6, 'scanned': 4, 'errors': 2, 'error_types': {'ValueError': 1, 'RuntimeError': 1}}
   ```
 - **Status Kriteria Fase 3**: **LULUS**
 
@@ -197,9 +214,7 @@ Tidak ada. (Catatan: file referensi opsional `smc_update_develop2.patch` tidak t
 
 ## 5. Temuan Baru / Risiko yang Terlihat Selama Audit (Dilaporkan Tanpa Diubah)
 
-1. **Tracking `.pyc` di dalam Git (`scanner_core/__pycache__/*.pyc`)**: Beberapa file bytecode `.pyc` di `scanner_core/__pycache__/` terlacak di dalam repositori pada branch `develop2`, sehingga setiap kompilasi ulang Python memicu status *modified* pada file `.pyc` jika tidak diabaikan via `git rm --cached` + `.gitignore`.
-2. **Pemotongan Candle Terakhir di `htf_context` (`scanner_core/indicators.py`)**: Fungsi `htf_context` memotong bar terakhir (`df = df.iloc[:-1]` jika `len(df) > 20`) dengan asumsi bar terakhir masih berjalan (*unclosed*), sedangkan `AsyncBinance.klines` sudah memfilter hanya candle yang `close_time <= server_ms` (sudah *closed*). Akibatnya, `htf_context` tertinggal 1 bar *closed* pada 4H dan 1H.
-3. **Mutasi `s.status` dan `s.score` secara *in-place* oleh `ai_validator.audit_top_setups`**: Sebelum Fase 4 menyimpan `py_status_map`, status asli dari mesin Python langsung ditimpa oleh `s.status = res["status"]` tanpa menyimpan atribut `s.python_status` pada dataclass `Setup` (berbeda dengan `s.python_score` yang sudah ada di `Setup`).
+1. **Mutasi `s.status` dan `s.score` secara *in-place* oleh `ai_validator.audit_top_setups`**: Sebelum Fase 4 menyimpan `py_status_map`, status asli dari mesin Python langsung ditimpa oleh `s.status = res["status"]` tanpa menyimpan atribut `s.python_status` pada dataclass `Setup` (berbeda dengan `s.python_score` yang sudah ada di `Setup`).
 
 ---
 
@@ -393,7 +408,7 @@ Python bertugas sebagai tracker, penemu struktur objektif, dan pengukur geometri
 - Efficiency Ratio: 1H(24b)=0.32, 15M(32b)=0.09 | Killzone: OFF_KILLZONE (17:00 UTC) | BTC: 4H=BEARISH, 1H=BEARISH
 - Pool Likuiditas Target: 1H@43.0398(RR 2.1), 1H@43.9682(RR 3.1), 1H@46.2470(RR 5.5), 1H@46.3446(RR 5.6) | Jarak TP2 ke Pool Terdekat: 0.00xATR1H
 - Khusus Pre-Tap: Kecepatan=0.12ATR15/bar | Range4Bar=1.63xATR15 | Vol(4/24)=0.54x | Likuiditas Antara Harga-POI=0
-- Flags Netral: NONE
+- Flags Netral: SWEEP_STALE
 
 [LEVEL & FIXED LIQUIDITY-PROTECTED SL (NO BEP)] Entry: 41.0814 (Batas Sweep-Entry: 40.3229) (POI: 40.4829 - 41.1871 | Menunggu Sentuhan)
 - SL Tetap: 40.1468 | Proteksi SL di balik: SL diamankan di balik Wick 1H OB (40.3229) — tahan Judas Swing | Checkpoint TP1: 43.0398 | Target Utama TP2: 43.9641 (RR 1:3.1, WAJIB >= 1:3.0) | TP3 Runner: 48.5585 (RR 1:8.0) | Tembok Lawan: 44.3505 | Invalidasi: Close 1H/15M menembus bawah SL struktural 40.1468 (di bawah zona POI 40.4829).
