@@ -583,36 +583,79 @@ def build_report(
 
 
 _CODE_VERSION_CACHE: Optional[str] = None
+_NON_SIGNAL_CFG_FIELDS = frozenset({
+    "workers",
+    "use_async",
+    "ai_audit",
+    "ai_top_n",
+    "fetch_derivatives",
+    "radar_mode",
+    "only_in_zone",
+})
+
+
+def _is_dirty_porcelain_line(line: str) -> bool:
+    """Abaiakan perubahan di folder scan_output/ saat mengecek status dirty repo."""
+    s = line.rstrip("\r\n")
+    if not s:
+        return False
+    path_part = s[3:].strip() if len(s) > 3 else s.strip()
+    parts = [p.strip().strip('"') for p in path_part.split(" -> ")] if " -> " in path_part else [path_part.strip('"')]
+    for p in parts:
+        norm = p.replace("\\", "/")
+        if norm == "scan_output" or norm.startswith("scan_output/"):
+            return False
+    return True
 
 
 def get_code_version() -> str:
-    """Ambil git short SHA (dicache di level modul agar subprocess tidak dipanggil per baris)."""
+    """Ambil git short SHA (+ '-dirty' bila working tree luar scan_output kotor), dicache per proses."""
     global _CODE_VERSION_CACHE
     if _CODE_VERSION_CACHE is not None:
         return _CODE_VERSION_CACHE
+    repo_dir = os.path.dirname(os.path.abspath(__file__)) or "."
     try:
         out = subprocess.check_output(
             ["git", "rev-parse", "--short", "HEAD"],
-            cwd=os.path.dirname(os.path.abspath(__file__)) or ".",
+            cwd=repo_dir,
             stderr=subprocess.DEVNULL,
             timeout=3,
             text=True,
         ).strip()
-        _CODE_VERSION_CACHE = out if out else "nogit"
+        if not out:
+            _CODE_VERSION_CACHE = "nogit"
+            return _CODE_VERSION_CACHE
     except Exception:
         _CODE_VERSION_CACHE = "nogit"
+        return _CODE_VERSION_CACHE
+
+    try:
+        st_out = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=repo_dir,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            text=True,
+        )
+        if any(_is_dirty_porcelain_line(ln) for ln in st_out.splitlines()):
+            out = f"{out}-dirty"
+    except Exception:
+        pass
+
+    _CODE_VERSION_CACHE = out
     return _CODE_VERSION_CACHE
 
 
 def compute_cfg_hash(cfg: Optional[Config] = None) -> str:
-    """Hitung SHA1 10 karakter dari dataclasses.asdict(cfg) untuk atribusi konfigurasi."""
+    """Hitung SHA1 10 karakter dari dataclasses.asdict(cfg) tanpa field non-sinyal."""
     if cfg is not None and dataclasses.is_dataclass(cfg):
         c_dict = dataclasses.asdict(cfg)
     elif isinstance(cfg, dict):
-        c_dict = cfg
+        c_dict = dict(cfg)
     else:
         c_dict = dataclasses.asdict(Config())
-    payload = json.dumps(c_dict, sort_keys=True, default=str)
+    filtered = {k: v for k, v in c_dict.items() if k not in _NON_SIGNAL_CFG_FIELDS}
+    payload = json.dumps(filtered, sort_keys=True, default=str)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
 
 

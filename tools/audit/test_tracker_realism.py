@@ -407,9 +407,247 @@ def test_code_version_and_cfg_hash() -> None:
     print(f"[PASS] code_version={ver} & cfg_hash ({h1} != {h2}) verified in JSONL & CSV")
 
 
+def test_since_version_before_dedup_and_csv_priority() -> None:
+    from scanner_core.evidence_report import version_matches  # noqa: F401 (import sanity)
+
+    class SimpleFakeAsyncBinance:
+        def __init__(self, concurrency: int = 14):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def server_time(self) -> int:
+            return int(pd.Timestamp("2026-11-20 00:00:00").timestamp() * 1000)
+
+        async def klines(self, sym: str, interval: str, limit: int, server_ms: int, start_time: int = 0):
+            return _make_bars([
+                (100.0, 101.0, 99.5, 101.0),
+                (101.0, 106.5, 100.5, 106.2),
+            ])
+
+    def _base_csv_row(sym: str, scan_utc: str, sig_utc: str) -> dict:
+        return {
+            "scan_utc": scan_utc,
+            "signal_candle_utc": sig_utc,
+            "symbol": sym,
+            "direction": "LONG",
+            "kind": "SMC_SNIPER",
+            "archetype": "TREND_CONT",
+            "status": "ENTRY READY",
+            "score": 82.0,
+            "ai_decision": "APPROVED",
+            "entry": 100.0,
+            "stop_loss": 98.0,
+            "tp1": 103.0,
+            "tp2": 106.0,
+            "rr": 3.0,
+        }
+
+    # 1. --since-version MUST run BEFORE 4h dedup so newer-version signals aren't shadowed by legacy
+    with tempfile.TemporaryDirectory() as tmpdir_dedup:
+        r_old = _base_csv_row("BTCUSDT", "2026-11-15 08:00:00", "2026-11-15 08:00")
+        r_old["code_version"] = "legacy"
+        r_old["cfg_hash"] = "0000000001"
+        r_new = _base_csv_row("BTCUSDT", "2026-11-15 09:00:00", "2026-11-15 09:00")
+        r_new["code_version"] = "new_sha123"
+        r_new["cfg_hash"] = "0000000002"
+        pd.DataFrame([r_old]).to_csv(os.path.join(tmpdir_dedup, "scan_20261115_0800.csv"), index=False)
+        pd.DataFrame([r_new]).to_csv(os.path.join(tmpdir_dedup, "scan_20261115_0900.csv"), index=False)
+
+        with patch.object(tracker_mod, "AsyncBinance", SimpleFakeAsyncBinance):
+            _, res_all = asyncio.run(
+                tracker_mod._track_signals_async(scan_dir=tmpdir_dedup, write_outputs=False)
+            )
+            _, res_filt = asyncio.run(
+                tracker_mod._track_signals_async(
+                    scan_dir=tmpdir_dedup,
+                    since_version="new_sha123",
+                    write_outputs=False,
+                )
+            )
+        assert len(res_all) == 1 and res_all.iloc[0]["code_version"] == "legacy", (
+            f"Unfiltered 4h dedup sanity check failed: {res_all}"
+        )
+        assert len(res_filt) == 1 and res_filt.iloc[0]["code_version"] == "new_sha123", (
+            f"Version filter ran AFTER 4h dedup and dropped new signal: {res_filt}"
+        )
+        assert res_filt.iloc[0]["scan_utc"] == "2026-11-15 09:00:00"
+
+    # 2a. CSV code_version is primary source; empty CSV falls back to JSONL; missing in both -> 'legacy'
+    with tempfile.TemporaryDirectory() as tmpdir_prio:
+        rows_prio = []
+        for sym, cv, ch in [
+            ("ETHUSDT", "v_csv", "csvhash001"),
+            ("SOLUSDT", "", ""),
+            ("BNBUSDT", "", ""),
+        ]:
+            r = _base_csv_row(sym, "2026-11-15 08:00:00", "2026-11-15 08:00")
+            r["code_version"] = cv
+            r["cfg_hash"] = ch
+            rows_prio.append(r)
+        pd.DataFrame(rows_prio).to_csv(os.path.join(tmpdir_prio, "scan_20261115_0800.csv"), index=False)
+
+        with open(os.path.join(tmpdir_prio, "setups_audit.jsonl"), "w", encoding="utf-8") as fh:
+            for sym, cv, ch in [
+                ("ETHUSDT", "v_jsonl", "jsonlh001"),
+                ("SOLUSDT", "v_jsonl", "jsonlh002"),
+            ]:
+                fh.write(json.dumps({
+                    "scan_utc": "2026-11-15 08:00:00",
+                    "symbol": sym,
+                    "direction": "LONG",
+                    "code_version": cv,
+                    "cfg_hash": ch,
+                }) + "\n")
+
+        with patch.object(tracker_mod, "AsyncBinance", SimpleFakeAsyncBinance):
+            _, df_unfilt = asyncio.run(
+                tracker_mod._track_signals_async(scan_dir=tmpdir_prio, write_outputs=False)
+            )
+            _, df_v_csv = asyncio.run(
+                tracker_mod._track_signals_async(scan_dir=tmpdir_prio, since_version="v_csv", write_outputs=False)
+            )
+            _, df_v_jsonl = asyncio.run(
+                tracker_mod._track_signals_async(scan_dir=tmpdir_prio, since_version="v_jsonl", write_outputs=False)
+            )
+
+        cv_map = dict(zip(df_unfilt["symbol"], df_unfilt["code_version"]))
+        ch_map = dict(zip(df_unfilt["symbol"], df_unfilt["cfg_hash"]))
+        assert cv_map == {"ETHUSDT": "v_csv", "SOLUSDT": "v_jsonl", "BNBUSDT": "legacy"}, f"Unexpected cv_map: {cv_map}"
+        assert ch_map["ETHUSDT"] == "csvhash001" and ch_map["SOLUSDT"] == "jsonlh002"
+        assert set(df_v_csv["symbol"]) == {"ETHUSDT"}, f"Expected only ETHUSDT for v_csv, got {list(df_v_csv['symbol'])}"
+        assert set(df_v_jsonl["symbol"]) == {"SOLUSDT"}, (
+            f"Expected only SOLUSDT for v_jsonl (ETHUSDT overridden by CSV v_csv), got {list(df_v_jsonl['symbol'])}"
+        )
+
+    # 2b. Legacy CSV without any code_version column at all: falls back to JSONL or 'legacy'
+    with tempfile.TemporaryDirectory() as tmpdir_nocol:
+        pd.DataFrame([
+            _base_csv_row("XRPUSDT", "2026-11-15 08:00:00", "2026-11-15 08:00"),
+            _base_csv_row("ADAUSDT", "2026-11-15 08:00:00", "2026-11-15 08:00"),
+        ]).to_csv(os.path.join(tmpdir_nocol, "scan_20261115_0800.csv"), index=False)
+        with open(os.path.join(tmpdir_nocol, "setups_audit.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "scan_utc": "2026-11-15 08:00:00",
+                "symbol": "XRPUSDT",
+                "direction": "LONG",
+                "code_version": "v_jonly",
+                "cfg_hash": "jh00000001",
+            }) + "\n")
+
+        with patch.object(tracker_mod, "AsyncBinance", SimpleFakeAsyncBinance):
+            _, df_nocol = asyncio.run(
+                tracker_mod._track_signals_async(scan_dir=tmpdir_nocol, write_outputs=False)
+            )
+            _, df_jonly = asyncio.run(
+                tracker_mod._track_signals_async(scan_dir=tmpdir_nocol, since_version="v_jonly", write_outputs=False)
+            )
+        assert dict(zip(df_nocol["symbol"], df_nocol["code_version"])) == {"XRPUSDT": "v_jonly", "ADAUSDT": "legacy"}
+        assert list(df_jonly["symbol"]) == ["XRPUSDT"]
+
+    print("[PASS] --since-version runs before 4h dedup; CSV code_version primary + JSONL fallback + 'legacy' verified")
+
+
+def test_dirty_git_version_and_cfg_exclusions() -> None:
+    from scanner_core.evidence_report import version_matches
+
+    prev_cache = binance._CODE_VERSION_CACHE
+    try:
+        # 1. Clean repo -> no -dirty
+        binance._CODE_VERSION_CACHE = None
+        with patch.object(binance.subprocess, "check_output", side_effect=["abc1234\n", ""]):
+            assert binance.get_code_version() == "abc1234"
+
+        # 2. Only scan_output/ dirty -> still no -dirty
+        binance._CODE_VERSION_CACHE = None
+        with patch.object(
+            binance.subprocess,
+            "check_output",
+            side_effect=["abc1234\n", "?? scan_output/scan_20261118.csv\n M scan_output/tracker_trades.csv\n"],
+        ):
+            assert binance.get_code_version() == "abc1234"
+
+        # 3. Non-scan_output file dirty -> '-dirty', and per-process cached on second call
+        binance._CODE_VERSION_CACHE = None
+        with patch.object(
+            binance.subprocess,
+            "check_output",
+            side_effect=["abc1234\n", "?? scan_output/x.csv\n M scanner_core/tracker.py\n"],
+        ) as mock_co:
+            v1 = binance.get_code_version()
+            v2 = binance.get_code_version()
+            assert v1 == "abc1234-dirty" and v2 == "abc1234-dirty"
+            assert mock_co.call_count == 2, f"Expected cached result without extra subprocess calls, got {mock_co.call_count}"
+
+        # 4. Fallback 'nogit' when git fails
+        binance._CODE_VERSION_CACHE = None
+        with patch.object(binance.subprocess, "check_output", side_effect=FileNotFoundError("no git")):
+            assert binance.get_code_version() == "nogit"
+    finally:
+        binance._CODE_VERSION_CACHE = None
+
+    assert version_matches("abc1234-dirty", "abc1234") is True
+    assert version_matches("abc1234-dirty", "abc1234-dirty") is True
+    assert version_matches("other123", "abc1234") is False
+
+    # 5. compute_cfg_hash excludes non-signal runtime fields, keeps signal fields sensitive
+    cfg_base = Config()
+    cfg_nonsig = Config(
+        workers=99,
+        use_async=False,
+        ai_audit=False,
+        ai_top_n=1,
+        fetch_derivatives=False,
+        radar_mode=True,
+        only_in_zone=True,
+    )
+    cfg_sig = Config(max_hold_hours=45.0)
+    h_base = binance.compute_cfg_hash(cfg_base)
+    h_nonsig = binance.compute_cfg_hash(cfg_nonsig)
+    h_sig = binance.compute_cfg_hash(cfg_sig)
+    assert h_base == h_nonsig, f"Non-signal fields changed cfg_hash: {h_base} vs {h_nonsig}"
+    assert h_base != h_sig, f"Signal field max_hold_hours did not change cfg_hash: {h_base}"
+    # Avoid leaving mock value cached if anything else touched it; prev_cache unused intentionally
+    _ = prev_cache
+
+    print("[PASS] get_code_version (-dirty excluding scan_output, cache, nogit fallback) & compute_cfg_hash exclusions verified")
+
+
+def test_summary_resolved_wr_and_time_exit_share() -> None:
+    df_syn = pd.DataFrame([
+        {"symbol": "A", "outcome": "TP2_FULL", "realized_r": 3.0, "hold_hours": 4.0, "risk_pct": 2.0, "kind": "SMC_SNIPER", "ai_decision": "APPROVED", "planned_rr": 3.0},
+        {"symbol": "B1", "outcome": "LOSS_SL", "realized_r": -1.0, "hold_hours": 3.0, "risk_pct": 2.0, "kind": "SMC_SNIPER", "ai_decision": "APPROVED", "planned_rr": 3.0},
+        {"symbol": "B2", "outcome": "LOSS_SL", "realized_r": -1.0, "hold_hours": 3.0, "risk_pct": 2.0, "kind": "SMC_SNIPER", "ai_decision": "APPROVED", "planned_rr": 3.0},
+        {"symbol": "B3", "outcome": "LOSS_SL", "realized_r": -1.0, "hold_hours": 3.0, "risk_pct": 2.0, "kind": "SMC_SNIPER", "ai_decision": "APPROVED", "planned_rr": 3.0},
+        {"symbol": "C1", "outcome": "TIME_EXIT", "realized_r": 1.0, "hold_hours": 30.0, "risk_pct": 2.0, "kind": "SMC_SNIPER", "ai_decision": "APPROVED", "planned_rr": 3.0},
+        {"symbol": "C2", "outcome": "TIME_EXIT", "realized_r": 1.0, "hold_hours": 30.0, "risk_pct": 2.0, "kind": "SMC_SNIPER", "ai_decision": "APPROVED", "planned_rr": 3.0},
+    ])
+    summary = tracker_mod._build_metrics_summary(df_syn, "TEST SUMMARY")
+    expected_eff = "Effective Win Rate (termasuk time-exit mark-to-market) :  50.0%  (1 Full TP2 [16.7%], 0 TP1->BEP, 3 SL, 2 Time-Exit)"
+    expected_res = "Win Rate resolved (TP2 vs SL saja)                 :  25.0%  (1/4 TP2 vs SL)  |  Kontribusi TIME_EXIT: +2.00 R (+100.0% dari total)"
+    assert expected_eff in summary, f"Missing Effective WR label in summary:\n{summary}"
+    assert expected_res in summary, f"Missing resolved WR / TIME_EXIT share in summary:\n{summary}"
+
+    df_60 = df_syn.copy()
+    df_60.loc[df_60["symbol"] == "C1", ["outcome", "realized_r", "hold_hours"]] = ["TP2_FULL", 3.0, 42.0]
+    cmp_block = tracker_mod._build_hold_compare_block(df_syn, df_60)
+    assert "Effective WR (termasuk time-exit)" in cmp_block
+    assert "Win Rate resolved (TP2 vs SL)" in cmp_block
+    assert "Kontribusi TIME_EXIT (R / %)" in cmp_block
+
+    print("[PASS] Summary resolved WR (TP2 vs SL), Effective WR mark-to-market label & TIME_EXIT Net R % verified")
+
+
 if __name__ == "__main__":
     test_limit_penetration()
     test_sl_slippage_and_fees_manual()
     test_zero_param_regression()
     test_fetch_error_csv_error_hold_compare_and_since_version()
     test_code_version_and_cfg_hash()
+    test_since_version_before_dedup_and_csv_priority()
+    test_dirty_git_version_and_cfg_exclusions()
+    test_summary_resolved_wr_and_time_exit_share()

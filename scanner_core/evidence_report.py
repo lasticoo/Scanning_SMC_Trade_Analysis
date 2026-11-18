@@ -265,23 +265,33 @@ def version_matches(code_ver: str, since_version: str) -> bool:
     if key in _VERSION_MATCH_CACHE:
         return _VERSION_MATCH_CACHE[key]
 
+    sv_base = sv[:-6] if sv.endswith("-dirty") else sv
+    cv_base = cv[:-6] if cv.endswith("-dirty") else cv
     res = False
     if cv == sv:
         res = True
-    elif cv in ("legacy", "nogit"):
+    elif cv_base in ("legacy", "nogit", ""):
         res = False
-    elif len(sv) >= 4 and len(cv) >= 4 and (cv.lower().startswith(sv.lower()) or sv.lower().startswith(cv.lower())):
+    elif not sv.endswith("-dirty") and cv_base == sv_base:
+        res = True
+    elif (
+        not sv.endswith("-dirty")
+        and len(sv_base) >= 4
+        and len(cv_base) >= 4
+        and (cv_base.lower().startswith(sv_base.lower()) or sv_base.lower().startswith(cv_base.lower()))
+    ):
         res = True
     else:
         try:
             rc = subprocess.run(
-                ["git", "merge-base", "--is-ancestor", sv, cv],
+                ["git", "merge-base", "--is-ancestor", sv_base, cv_base],
                 cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=3,
             ).returncode
-            res = rc == 0
+            if rc == 0:
+                res = not (sv.endswith("-dirty") and cv_base == sv_base and not cv.endswith("-dirty"))
         except Exception:
             res = False
 

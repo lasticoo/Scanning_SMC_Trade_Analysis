@@ -214,13 +214,25 @@ def simulate_trade_on_bars(
 
 def _summarize_quick_metrics(df_trades: pd.DataFrame) -> dict:
     if df_trades.empty or "outcome" not in df_trades.columns:
-        return {"closed": 0, "open": 0, "unfilled": 0, "fetch_err": 0, "wr": 0.0, "tp2": 0, "sl": 0, "texit": 0, "net_r": 0.0, "exp": 0.0, "ex10_net": 0.0, "ex10_exp": 0.0, "pf": 0.0, "max_dd": 0.0, "avg_hold": 0.0}
+        return {
+            "closed": 0, "open": 0, "unfilled": 0, "fetch_err": 0,
+            "wr": 0.0, "resolved_wr": 0.0, "tp2": 0, "sl": 0, "texit": 0,
+            "texit_net_r": 0.0, "texit_pct": 0.0,
+            "net_r": 0.0, "exp": 0.0, "ex10_net": 0.0, "ex10_exp": 0.0,
+            "pf": 0.0, "max_dd": 0.0, "avg_hold": 0.0,
+        }
     closed = df_trades[df_trades["outcome"].isin(["TP2_FULL", "TP1_BEP", "LOSS_SL", "TIME_EXIT"])]
     open_cnt = int((df_trades["outcome"] == "OPEN").sum())
     unfilled_cnt = int((df_trades["outcome"] == "UNFILLED").sum())
     fe_cnt = int((df_trades["outcome"] == "FETCH_ERROR").sum())
     if closed.empty:
-        return {"closed": 0, "open": open_cnt, "unfilled": unfilled_cnt, "fetch_err": fe_cnt, "wr": 0.0, "tp2": 0, "sl": 0, "texit": 0, "net_r": 0.0, "exp": 0.0, "ex10_net": 0.0, "ex10_exp": 0.0, "pf": 0.0, "max_dd": 0.0, "avg_hold": 0.0}
+        return {
+            "closed": 0, "open": open_cnt, "unfilled": unfilled_cnt, "fetch_err": fe_cnt,
+            "wr": 0.0, "resolved_wr": 0.0, "tp2": 0, "sl": 0, "texit": 0,
+            "texit_net_r": 0.0, "texit_pct": 0.0,
+            "net_r": 0.0, "exp": 0.0, "ex10_net": 0.0, "ex10_exp": 0.0,
+            "pf": 0.0, "max_dd": 0.0, "avg_hold": 0.0,
+        }
     r_vals = closed["realized_r"].values.astype(float)
     wins = closed[closed["realized_r"] > 0]
     losses = closed[closed["realized_r"] <= 0]
@@ -231,16 +243,26 @@ def _summarize_quick_metrics(df_trades: pd.DataFrame) -> dict:
     peaks = np.maximum.accumulate(np.insert(eq, 0, 0.0))[1:]
     max_dd = float(np.max(peaks - eq)) if len(eq) else 0.0
     r_ex10 = np.sort(r_vals)[:-10] if len(r_vals) > 10 else np.array([], dtype=float)
+    tp2_c = int((closed["outcome"] == "TP2_FULL").sum())
+    sl_c = int((closed["outcome"] == "LOSS_SL").sum())
+    res_n = tp2_c + sl_c
+    resolved_wr = (tp2_c / res_n * 100.0) if res_n > 0 else 0.0
+    net_r = float(np.sum(r_vals))
+    texit_net_r = float(closed.loc[closed["outcome"] == "TIME_EXIT", "realized_r"].sum())
+    texit_pct = (texit_net_r / abs(net_r) * 100.0) if abs(net_r) > 1e-9 else 0.0
     return {
         "closed": len(closed),
         "open": open_cnt,
         "unfilled": unfilled_cnt,
         "fetch_err": fe_cnt,
         "wr": len(wins) / len(closed) * 100.0,
-        "tp2": int((closed["outcome"] == "TP2_FULL").sum()),
-        "sl": int((closed["outcome"] == "LOSS_SL").sum()),
+        "resolved_wr": resolved_wr,
+        "tp2": tp2_c,
+        "sl": sl_c,
         "texit": int((closed["outcome"] == "TIME_EXIT").sum()),
-        "net_r": float(np.sum(r_vals)),
+        "texit_net_r": texit_net_r,
+        "texit_pct": texit_pct,
+        "net_r": net_r,
         "exp": float(np.mean(r_vals)),
         "ex10_net": float(np.sum(r_ex10)) if len(r_ex10) else 0.0,
         "ex10_exp": float(np.mean(r_ex10)) if len(r_ex10) else 0.0,
@@ -257,7 +279,9 @@ def _build_hold_compare_block(df_30: pd.DataFrame, df_60: pd.DataFrame) -> str:
         ("Closed Trades", f"{m30['closed']}", f"{m60['closed']}", f"{m60['closed'] - m30['closed']:+d}"),
         ("Open / Unfilled", f"{m30['open']} / {m30['unfilled']}", f"{m60['open']} / {m60['unfilled']}", "-"),
         ("Full TP2 / SL / Time-Exit", f"{m30['tp2']} / {m30['sl']} / {m30['texit']}", f"{m60['tp2']} / {m60['sl']} / {m60['texit']}", f"TP2 {m60['tp2'] - m30['tp2']:+d}"),
-        ("Effective Win Rate", f"{m30['wr']:.1f}%", f"{m60['wr']:.1f}%", f"{m60['wr'] - m30['wr']:+.1f}%"),
+        ("Effective WR (termasuk time-exit)", f"{m30['wr']:.1f}%", f"{m60['wr']:.1f}%", f"{m60['wr'] - m30['wr']:+.1f}%"),
+        ("Win Rate resolved (TP2 vs SL)", f"{m30['resolved_wr']:.1f}%", f"{m60['resolved_wr']:.1f}%", f"{m60['resolved_wr'] - m30['resolved_wr']:+.1f}%"),
+        ("Kontribusi TIME_EXIT (R / %)", f"{m30['texit_net_r']:+.2f}R ({m30['texit_pct']:+.1f}%)", f"{m60['texit_net_r']:+.2f}R ({m60['texit_pct']:+.1f}%)", f"{m60['texit_net_r'] - m30['texit_net_r']:+.2f}R"),
         ("Total Net Return (R)", f"{m30['net_r']:+.2f}R", f"{m60['net_r']:+.2f}R", f"{m60['net_r'] - m30['net_r']:+.2f}R"),
         ("Expectancy (R/trade)", f"{m30['exp']:+.2f}R", f"{m60['exp']:+.2f}R", f"{m60['exp'] - m30['exp']:+.2f}R"),
         ("Ex-Top10 Net Return (R)", f"{m30['ex10_net']:+.2f}R", f"{m60['ex10_net']:+.2f}R", f"{m60['ex10_net'] - m30['ex10_net']:+.2f}R"),
@@ -336,8 +360,21 @@ def _build_metrics_summary(
 
     lines.append("-" * 108)
     lines.append(
-        f"Effective Win Rate (TP2 + TP1/BEP) : {win_rate:5.1f}%  ({tp2_cnt} Full TP2 [{tp2_rate:.1f}%], "
-        f"{tp1_bep_cnt} TP1->BEP, {sl_cnt} SL, {texit_cnt} Time-Exit)"
+        f"Effective Win Rate (termasuk time-exit mark-to-market) : {win_rate:5.1f}%  "
+        f"({tp2_cnt} Full TP2 [{tp2_rate:.1f}%], {tp1_bep_cnt} TP1->BEP, {sl_cnt} SL, {texit_cnt} Time-Exit)"
+    )
+    resolved_n = tp2_cnt + sl_cnt
+    resolved_wr = (tp2_cnt / resolved_n * 100.0) if resolved_n > 0 else 0.0
+    texit_net_r = float(closed.loc[closed["outcome"] == "TIME_EXIT", "realized_r"].sum())
+    if abs(total_r) > 1e-9:
+        texit_pct = (texit_net_r / abs(total_r)) * 100.0
+        pct_lbl = "dari total" if total_r > 0 else "vs |total|"
+        texit_pct_txt = f"{texit_pct:+.1f}% {pct_lbl}"
+    else:
+        texit_pct_txt = "0.0% (total 0R)" if abs(texit_net_r) < 1e-9 else "N/A (total 0R)"
+    lines.append(
+        f"Win Rate resolved (TP2 vs SL saja)                 : {resolved_wr:5.1f}%  ({tp2_cnt}/{resolved_n} TP2 vs SL)  |  "
+        f"Kontribusi TIME_EXIT: {texit_net_r:+.2f} R ({texit_pct_txt})"
     )
     lines.append(
         f"Total Net Return                   : {total_r:+.2f} R  |  Expectancy: {expectancy:+.2f} R/trade  |  Profit Factor: {pf:.2f}"
@@ -471,13 +508,55 @@ async def _track_signals_async(
     if cand_df.empty:
         return "Belum ada baris berstatus ENTRY READY di histori CSV.", pd.DataFrame()
 
-    # Deduplikasi sinyal berulang dalam jendela 4 jam pada simbol & arah yang sama
+    def _clean_opt(val) -> str:
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            return ""
+        s_v = str(val).strip()
+        return "" if s_v.lower() in ("", "nan", "none", "null") else s_v
+
     cand_df["sig_ms"] = cand_df.apply(
         lambda r: _parse_utc_ms(str(r.get("signal_candle_utc") or r.get("scan_utc") or "")),
         axis=1,
     )
     cand_df = cand_df.dropna(subset=["sig_ms"]).sort_values("sig_ms").reset_index(drop=True)
 
+    # Filter --since-version SEBELUM dedup 4 jam agar sinyal versi baru tidak dibuang oleh sinyal legacy lebih awal.
+    # Sumber utama: kolom `code_version` di CSV scan; fallback ke join JSONL hanya bila kolom tidak ada; default "legacy".
+    sv = str(since_version or "").strip()
+    if sv:
+        has_csv_ver_col = "code_version" in cand_df.columns
+        need_jsonl_fallback = not has_csv_ver_col or cand_df["code_version"].apply(lambda v: not bool(_clean_opt(v))).any()
+        ver_map: Dict[Tuple[str, str, str], str] = {}
+        if need_jsonl_fallback:
+            audit_pre = load_audit_jsonl(scan_dir)
+            if audit_pre is not None and not audit_pre.empty and "code_version" in audit_pre.columns:
+                for _, arow in audit_pre.iterrows():
+                    k_a = (
+                        str(arow.get("scan_utc") or "").strip(),
+                        str(arow.get("symbol") or "").strip(),
+                        str(arow.get("direction") or "").strip(),
+                    )
+                    ver_map[k_a] = _clean_opt(arow.get("code_version")) or "legacy"
+
+        def _row_ver_ok(r: pd.Series) -> bool:
+            cv_csv = _clean_opt(r.get("code_version")) if has_csv_ver_col else ""
+            if cv_csv:
+                cv_eff = cv_csv
+            else:
+                k_r = (
+                    _clean_opt(r.get("scan_utc")),
+                    _clean_opt(r.get("symbol")),
+                    _clean_opt(r.get("direction")),
+                )
+                cv_eff = ver_map.get(k_r, "legacy")
+            return version_matches(cv_eff, sv)
+
+        pre_filter_cnt = len(cand_df)
+        cand_df = cand_df[cand_df.apply(_row_ver_ok, axis=1)].reset_index(drop=True)
+        if cand_df.empty:
+            return f"Tidak ditemukan sinyal dengan code_version cocok '--since-version {sv}' (kandidat sebelum filter: {pre_filter_cnt}).", pd.DataFrame()
+
+    # Deduplikasi sinyal berulang dalam jendela 4 jam pada simbol & arah yang sama
     dedup_rows = []
     last_seen: Dict[Tuple[str, str], int] = {}
     for _, row in cand_df.iterrows():
@@ -489,32 +568,8 @@ async def _track_signals_async(
         dedup_rows.append(row)
 
     uniq_df = pd.DataFrame(dedup_rows)
-
-    sv = str(since_version or "").strip()
-    if sv:
-        audit_pre = load_audit_jsonl(scan_dir)
-        ver_map: Dict[Tuple[str, str, str], str] = {}
-        if audit_pre is not None and not audit_pre.empty and "code_version" in audit_pre.columns:
-            for _, arow in audit_pre.iterrows():
-                k_a = (
-                    str(arow.get("scan_utc") or "").strip(),
-                    str(arow.get("symbol") or "").strip(),
-                    str(arow.get("direction") or "").strip(),
-                )
-                ver_map[k_a] = str(arow.get("code_version") or "").strip() or "legacy"
-
-        def _row_ver_ok(r: pd.Series) -> bool:
-            k_r = (
-                str(r.get("scan_utc") or "").strip(),
-                str(r.get("symbol") or "").strip(),
-                str(r.get("direction") or "").strip(),
-            )
-            cv_r = ver_map.get(k_r, "legacy")
-            return version_matches(cv_r, sv)
-
-        uniq_df = uniq_df[uniq_df.apply(_row_ver_ok, axis=1)].reset_index(drop=True)
-        if uniq_df.empty:
-            return f"Tidak ditemukan sinyal dengan code_version cocok '--since-version {sv}' (sinyal unik sebelum filter: {len(dedup_rows)}).", pd.DataFrame()
+    csv_cv_list = [_clean_opt(r.get("code_version")) for _, r in uniq_df.iterrows()]
+    csv_ch_list = [_clean_opt(r.get("cfg_hash")) for _, r in uniq_df.iterrows()]
 
     print(f"[Signal Tracker] Mengevaluasi {len(uniq_df)} sinyal unik dari {len(csv_files)} file histori scan ...", file=sys.stderr)
 
@@ -662,6 +717,14 @@ async def _track_signals_async(
 
     try:
         res_df = enrich_trades(res_df, load_audit_jsonl(scan_dir))
+        if len(res_df) == len(csv_cv_list) and "code_version" in res_df.columns:
+            for idx_r, cv_csv in enumerate(csv_cv_list):
+                if cv_csv:
+                    res_df.at[idx_r, "code_version"] = cv_csv
+        if len(res_df) == len(csv_ch_list) and "cfg_hash" in res_df.columns:
+            for idx_r, ch_csv in enumerate(csv_ch_list):
+                if ch_csv:
+                    res_df.at[idx_r, "cfg_hash"] = ch_csv
         res_df.attrs["fetch_errors"] = fe_dict
         res_df.attrs["csv_errors"] = ce_dict
         ev_report = build_evidence_report(res_df)
