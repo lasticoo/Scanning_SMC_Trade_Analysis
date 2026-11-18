@@ -382,6 +382,26 @@ Footer: Korelasi bukan kausalitas; banyak perbandingan menghasilkan temuan palsu
 
 ---
 
+### MODUL M02 — Geometri TP & R:R 1:3 (P0)
+- **File & Fungsi yang diubah**:
+  - `scanner_core/models.py`: Menambahkan `require_structural_tp2: bool = True` dan `path_clear_check: bool = True` ke `Config`.
+  - `scanner_core/mtf_smc.py`:
+    - **B1**: Menghapus ambang `0.30 * atr_1h` pada `wall_cap` (`wall_supply_4h["bot"] > plan_entry` untuk LONG dengan `wall_cap = max(plan_entry + 0.02*atr_1h, wall["bot"] - 0.05*atr_1h)`; cermin SHORT `wall_demand_4h["top"] < plan_entry` dengan `wall_cap = min(plan_entry - 0.02*atr_1h, wall["top"] + 0.05*atr_1h)`), serta menyelaraskan penandaan `blocked_by_wall`.
+    - **B2**: Saat `cfg.require_structural_tp2=True`, mengganti fallback karangan `3.1R` dengan kandidat struktur terjauh yang terjangkau (`max(reachable)` / `min(reachable)`, atau `plan_entry ± 0.5*risk`) dan menambahkan catatan `"TP2 struktural tidak tersedia >= 3R"`.
+    - **B3**: Menambahkan `_cap_tp2_by_opposing_zones(d, entry, tp2, risk, atr_1h, map1, wall4, min_rr)` yang mengecek zona lawan 1H (`bear_obs`/`bull_obs` `touches <= 1`, `breakers` `dir == -d` & `touches <= 1`, `fvgs` `dir == -d` & lebar `>= 0.25*atr_1h`) + `wall4` di koridor `(entry, tp2)`. Bila `room_rr >= min_rr`, TP2 diparkir di `cap` (`"TP2 diparkir..."`); bila `< min_rr`, `blocked_by_wall = True` (`"Jalur TP2 terhalang..."`).
+    - **B5**: Menjamin urutan `entry < tp1 <= tp2 < tp3` (LONG: `tp1 = min(tp1, entry + 0.68*(tp2-entry))`, `tp3 = max(tp3, tp2 + 1.2*risk)`; SHORT cermin) sebelum menghitung `rr_tp1`, `rr_tp3`, `est_h1`, `est_h2`.
+  - `tools/audit/test_geometry_path.py`: Pengujian unit & regresi (a)–(e) serta evaluasi dampak M02 pada 282 window sintetis.
+- **Dampak pada data sintetis (`tools/audit/synth_data.py`, 282 window)**:
+  - Sebelum M02 (lolos `status != "REJECT"`): `39/282` (`13.8%`).
+  - Sesudah M02 (lolos `status != "REJECT"`): `3/282` (`1.1%`).
+  - Berubah dari lolos -> `REJECT`: `36/39` (`92.3%` dari setup lolos | `12.8%` dari 282), terdiri dari:
+    - **B1** (tembok 4H dekat `< 3R`, sekaligus memicu B2 karena plafon `< 3R`): `8/39` (`20.5%` dari lolos | `2.8%` dari 282).
+    - **B2** (tanpa kandidat struktur `>= 3R` di luar B1): `0/39` pada subset lolos (`228/282` atau `80.9%` pada seluruh 282 window mencatat `"TP2 struktural tidak tersedia >= 3R"`).
+    - **B3** (`_cap_tp2_by_opposing_zones` koridor terhalang zona lawan 1H/4H): `28/39` (`71.8%` dari lolos | `9.9%` dari 282).
+  - Regresi kedua flag `False` (`require_structural_tp2=False, path_clear_check=False`): `200/200` skenario acak & `282/282` window sintetis `100%` identik dengan perilaku sebelum M02.
+
+---
+
 ## 3. Penyimpangan dari Spesifikasi
 
 - **Fase 4**: Logging JSONL per setup dikerjakan atas instruksi langsung pemilik repo, di luar spesifikasi tertulis awal yang menahannya. Selain itu, file referensi opsional `smc_update_develop2.patch` dan `audit_report.md` tidak tersedia di direktori kerja, sehingga seluruh implementasi mengacu langsung ke spesifikasi tertulis dan kondisi kode `2eeb6fd`..`412fbdc`.

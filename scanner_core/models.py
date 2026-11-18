@@ -57,6 +57,8 @@ class Config:
     limit_pen_bps: float = 2.0      # penetrasi minimum menembus harga limit agar antrian terisi (bps)
     mm_factor: float = 1.0
     min_rr: float = 3.0             # wajib R:R efektif minimal 1:3.0 (jika kurang -> REJECT)
+    require_structural_tp2: bool = True  # wajib TP2 dari struktur nyata >= 3R (tanpa fallback 3.1R)
+    path_clear_check: bool = True   # cek koridor entry->TP2 bersih dari zona lawan 1H/4H
     fixed_sl_no_bep: bool = True    # Set-and-Forget SL di balik likuiditas (pantang geser SL ke BEP)
     entry_score: int = 80
     watch_score: int = 65

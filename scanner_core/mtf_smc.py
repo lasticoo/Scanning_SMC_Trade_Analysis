@@ -546,6 +546,68 @@ def _format_orderflow_summary(cvd: dict, deriv: dict, funding: float, d: int) ->
     return " | ".join(tags), min(6.0, pts)
 
 
+def _cap_tp2_by_opposing_zones(
+    d: int,
+    entry: float,
+    tp2: float,
+    risk: float,
+    atr_1h: float,
+    map1: Optional[dict],
+    wall4: Optional[dict],
+    min_rr: float,
+) -> Tuple[float, bool, str]:
+    """
+    Mengecek koridor (entry, tp2) terhadap zona lawan 1H (OB/Breaker touches <= 1,
+    FVG lebar >= 0.25*ATR 1H) serta tembok 4H terdekat.
+    Jika ada zona lawan di jalur:
+    - Bila ruang ke tepi depan zona (+/- 0.05*ATR 1H) >= min_rr: parkir TP2 di depan zona.
+    - Bila ruang < min_rr: tandai blocked=True agar setup di-REJECT.
+    """
+    opp_zones: List[dict] = []
+    if map1:
+        obs_key = "bear_obs" if d == 1 else "bull_obs"
+        for z in map1.get(obs_key, []):
+            if z.get("touches", 0) <= 1:
+                opp_zones.append(z)
+        for z in map1.get("breakers", []):
+            if z.get("dir") == -d and z.get("touches", 0) <= 1:
+                opp_zones.append(z)
+        for z in map1.get("fvgs", []):
+            if z.get("dir") == -d and (float(z["top"]) - float(z["bot"])) >= 0.25 * atr_1h:
+                opp_zones.append(z)
+    if wall4:
+        opp_zones.append(wall4)
+
+    lo, hi = (entry, tp2) if d == 1 else (tp2, entry)
+    buf = 0.10 * atr_1h
+    in_path: List[dict] = []
+    for z in opp_zones:
+        z_bot = float(z["bot"])
+        z_top = float(z["top"])
+        ahead_of_entry = (z_bot >= entry) if d == 1 else (z_top <= entry)
+        if ahead_of_entry and z_top > lo + buf and z_bot < hi - buf:
+            in_path.append(z)
+
+    if not in_path:
+        return tp2, False, ""
+
+    if d == 1:
+        front_z = min(in_path, key=lambda z: float(z["bot"]))
+        front = float(front_z["bot"])
+        cap = front - 0.05 * atr_1h
+        room_rr = (cap - entry) / max(risk, 1e-12)
+    else:
+        front_z = max(in_path, key=lambda z: float(z["top"]))
+        front = float(front_z["top"])
+        cap = front + 0.05 * atr_1h
+        room_rr = (entry - cap) / max(risk, 1e-12)
+
+    z_lbl = front_z.get("kind") or ("Tembok Supply/Demand 4H" if front_z is wall4 else "Zona Lawan 1H")
+    if room_rr >= min_rr:
+        return cap, False, f"TP2 diparkir di depan {z_lbl} ({fp(front)}, RR 1:{room_rr:.1f})."
+    return tp2, True, f"Jalur TP2 terhalang {z_lbl} ({fp(front)}, ruang {room_rr:.2f}R < 1:{min_rr:.1f})."
+
+
 def _compute_trade_geometry(
     d: int,
     archetype: str,
@@ -753,24 +815,33 @@ def _compute_trade_geometry(
     eq_4h = (r4_lo + r4_hi) / 2.0
 
     blocked_by_wall = False
+    req_struct_tp2 = bool(getattr(cfg, "require_structural_tp2", True))
+    path_clear = bool(getattr(cfg, "path_clear_check", True))
 
     if d == 1:
         # Batasi TP2 pada Tembok Supply 4H aktif (touches <= 2) yang menghalangi jalur naik
         wall_cap = None
-        if (
-            wall_supply_4h
-            and wall_supply_4h.get("touches", 0) <= 2
-            and wall_supply_4h["bot"] > plan_entry + 0.30 * atr_1h
-        ):
-            wall_cap = max(plan_entry + 0.10 * atr_1h, wall_supply_4h["bot"] - 0.05 * atr_1h)
+        if wall_supply_4h and wall_supply_4h.get("touches", 0) <= 2:
+            if path_clear:
+                if wall_supply_4h["bot"] > plan_entry:
+                    wall_cap = max(plan_entry + 0.02 * atr_1h, wall_supply_4h["bot"] - 0.05 * atr_1h)
+            elif wall_supply_4h["bot"] > plan_entry + 0.30 * atr_1h:
+                wall_cap = max(plan_entry + 0.10 * atr_1h, wall_supply_4h["bot"] - 0.05 * atr_1h)
 
         cands_tp: List[float] = [w_eq, w_high, eq_4h]
         if map1:
-            cands_tp.extend(map1["eqh"])
-            cands_tp.extend([s["price"] for s in map1["highs"][-8:]])
-            cands_tp.extend([z["bot"] for z in map1["bear_obs"] if z["bot"] > plan_entry])
-            cands_tp.extend([z["bot"] for z in map1["fvgs"] if z["dir"] == -1 and z["bot"] > plan_entry])
-        cands_tp.extend(map15["eqh"])
+            cands_tp.extend(map1.get("eqh", []))
+            cands_tp.extend([s["price"] for s in map1.get("highs", [])[-8:]])
+            if not path_clear:
+                cands_tp.extend([z["bot"] for z in map1.get("bear_obs", []) if z["bot"] > plan_entry])
+                cands_tp.extend([z["bot"] for z in map1.get("fvgs", []) if z["dir"] == -1 and z["bot"] > plan_entry])
+            else:
+                cands_tp.extend([z["bot"] for z in map1.get("bear_obs", []) if z["bot"] > plan_entry and z.get("touches", 0) > 1])
+                cands_tp.extend([
+                    z["bot"] for z in map1.get("fvgs", [])
+                    if z["dir"] == -1 and z["bot"] > plan_entry and (float(z["top"]) - float(z["bot"])) < 0.25 * atr_1h
+                ])
+        cands_tp.extend(map15.get("eqh", []))
         if wall_supply_4h and wall_supply_4h["bot"] > plan_entry:
             cands_tp.append(wall_supply_4h["bot"] - 0.05 * atr_1h)
             cands_tp.append(wall_supply_4h["top"])
@@ -791,19 +862,40 @@ def _compute_trade_geometry(
             sweet_tp2 = [x for x in valid_tp2 if x <= plan_entry + 4.8 * risk]
             tp2 = sweet_tp2[0] if sweet_tp2 else min(valid_tp2[0], reach_ceiling)
         else:
-            # Jika tidak ada kandidat di atas 3.0R namun reach_ceiling masih >= 3.0R, gunakan min(3.1R, reach_ceiling).
-            # Jika reach_ceiling < 3.0R (karena Tembok 4H atau Range sempit), biarkan tp2 = reach_ceiling (< 3.0R) agar di-REJECT!
-            tp2 = min(plan_entry + (target_min_rr + 0.10) * risk, reach_ceiling)
+            if req_struct_tp2:
+                reachable = [x for x in cands_tp if plan_entry < x <= reach_ceiling]
+                tp2 = max(reachable) if reachable else (plan_entry + 0.5 * risk)
+                if wall_cap is not None:
+                    tp2 = min(tp2, wall_cap)
+                notes.append("TP2 struktural tidak tersedia >= 3R")
+            else:
+                # Jika tidak ada kandidat di atas 3.0R namun reach_ceiling masih >= 3.0R, gunakan min(3.1R, reach_ceiling).
+                # Jika reach_ceiling < 3.0R (karena Tembok 4H atau Range sempit), biarkan tp2 = reach_ceiling (< 3.0R) agar di-REJECT!
+                tp2 = min(plan_entry + (target_min_rr + 0.10) * risk, reach_ceiling)
 
-        if wall_cap is not None and tp2 >= wall_cap - 1e-9 and (wall_cap - plan_entry) / risk < target_min_rr:
+        wall_blocks_rr = (
+            (wall_cap - plan_entry) / risk < target_min_rr
+            if (req_struct_tp2 or path_clear)
+            else (tp2 >= wall_cap - 1e-9 and (wall_cap - plan_entry) / risk < target_min_rr)
+        ) if wall_cap is not None else False
+        if wall_cap is not None and wall_blocks_rr:
             blocked_by_wall = True
             notes.append(f"Ruang target terhalang Tembok Supply 4H ({fp(wall_supply_4h['bot'])}) sebelum mencapai 1:{target_min_rr:.1f} R:R.")
+
+        if path_clear:
+            tp2, path_blocked, path_note = _cap_tp2_by_opposing_zones(
+                d, plan_entry, tp2, risk, atr_1h, map1, wall_supply_4h, target_min_rr
+            )
+            if path_blocked:
+                blocked_by_wall = True
+            if path_note:
+                notes.append(path_note)
 
         # TP1: Internal High / BSL terdekat di H1 (~1.3R - 2.2R) TANPA menggeser SL ke BEP
         h1_tp1_cands = []
         if map1:
-            h1_tp1_cands.extend(map1["eqh"])
-            h1_tp1_cands.extend([s["price"] for s in map1["highs"][-8:]])
+            h1_tp1_cands.extend(map1.get("eqh", []))
+            h1_tp1_cands.extend([s["price"] for s in map1.get("highs", [])[-8:]])
         h1_tp1_cands.append(w_eq)
         valid_tp1 = sorted([x for x in h1_tp1_cands if plan_entry + 1.30 * risk <= x <= plan_entry + 0.68 * max(tp2 - plan_entry, 0)])
         if valid_tp1:
@@ -821,23 +913,35 @@ def _compute_trade_geometry(
         else:
             tp3 = max(tp2 + 1.2 * risk, struct_ceiling)
 
+        if req_struct_tp2 or path_clear:
+            tp2 = max(tp2, plan_entry + 0.02 * atr_1h)
+            tp1 = min(tp1, plan_entry + 0.68 * (tp2 - plan_entry))
+            tp3 = max(tp3, tp2 + 1.2 * risk)
+
     else:
         # Batasi TP2 pada Tembok Demand 4H aktif (touches <= 2) yang menghalangi jalur turun
         wall_cap = None
-        if (
-            wall_demand_4h
-            and wall_demand_4h.get("touches", 0) <= 2
-            and wall_demand_4h["top"] < plan_entry - 0.30 * atr_1h
-        ):
-            wall_cap = min(plan_entry - 0.10 * atr_1h, wall_demand_4h["top"] + 0.05 * atr_1h)
+        if wall_demand_4h and wall_demand_4h.get("touches", 0) <= 2:
+            if path_clear:
+                if wall_demand_4h["top"] < plan_entry:
+                    wall_cap = min(plan_entry - 0.02 * atr_1h, wall_demand_4h["top"] + 0.05 * atr_1h)
+            elif wall_demand_4h["top"] < plan_entry - 0.30 * atr_1h:
+                wall_cap = min(plan_entry - 0.10 * atr_1h, wall_demand_4h["top"] + 0.05 * atr_1h)
 
         cands_tp = [w_eq, w_low, eq_4h]
         if map1:
-            cands_tp.extend(map1["eql"])
-            cands_tp.extend([s["price"] for s in map1["lows"][-8:]])
-            cands_tp.extend([z["top"] for z in map1["bull_obs"] if z["top"] < plan_entry])
-            cands_tp.extend([z["top"] for z in map1["fvgs"] if z["dir"] == 1 and z["top"] < plan_entry])
-        cands_tp.extend(map15["eql"])
+            cands_tp.extend(map1.get("eql", []))
+            cands_tp.extend([s["price"] for s in map1.get("lows", [])[-8:]])
+            if not path_clear:
+                cands_tp.extend([z["top"] for z in map1.get("bull_obs", []) if z["top"] < plan_entry])
+                cands_tp.extend([z["top"] for z in map1.get("fvgs", []) if z["dir"] == 1 and z["top"] < plan_entry])
+            else:
+                cands_tp.extend([z["top"] for z in map1.get("bull_obs", []) if z["top"] < plan_entry and z.get("touches", 0) > 1])
+                cands_tp.extend([
+                    z["top"] for z in map1.get("fvgs", [])
+                    if z["dir"] == 1 and z["top"] < plan_entry and (float(z["top"]) - float(z["bot"])) < 0.25 * atr_1h
+                ])
+        cands_tp.extend(map15.get("eql", []))
         if wall_demand_4h and wall_demand_4h["top"] < plan_entry:
             cands_tp.append(wall_demand_4h["top"] + 0.05 * atr_1h)
             cands_tp.append(wall_demand_4h["bot"])
@@ -857,17 +961,38 @@ def _compute_trade_geometry(
             sweet_tp2 = [x for x in valid_tp2 if x >= plan_entry - 4.8 * risk]
             tp2 = sweet_tp2[0] if sweet_tp2 else max(valid_tp2[0], reach_floor)
         else:
-            tp2 = max(plan_entry - (target_min_rr + 0.10) * risk, reach_floor)
+            if req_struct_tp2:
+                reachable = [x for x in cands_tp if reach_floor <= x < plan_entry]
+                tp2 = min(reachable) if reachable else (plan_entry - 0.5 * risk)
+                if wall_cap is not None:
+                    tp2 = max(tp2, wall_cap)
+                notes.append("TP2 struktural tidak tersedia >= 3R")
+            else:
+                tp2 = max(plan_entry - (target_min_rr + 0.10) * risk, reach_floor)
 
-        if wall_cap is not None and tp2 <= wall_cap + 1e-9 and (plan_entry - wall_cap) / risk < target_min_rr:
+        wall_blocks_rr = (
+            (plan_entry - wall_cap) / risk < target_min_rr
+            if (req_struct_tp2 or path_clear)
+            else (tp2 <= wall_cap + 1e-9 and (plan_entry - wall_cap) / risk < target_min_rr)
+        ) if wall_cap is not None else False
+        if wall_cap is not None and wall_blocks_rr:
             blocked_by_wall = True
             notes.append(f"Ruang target terhalang Tembok Demand 4H ({fp(wall_demand_4h['top'])}) sebelum mencapai 1:{target_min_rr:.1f} R:R.")
+
+        if path_clear:
+            tp2, path_blocked, path_note = _cap_tp2_by_opposing_zones(
+                d, plan_entry, tp2, risk, atr_1h, map1, wall_demand_4h, target_min_rr
+            )
+            if path_blocked:
+                blocked_by_wall = True
+            if path_note:
+                notes.append(path_note)
 
         # TP1: Internal Low / SSL terdekat di H1 (~1.3R - 2.2R) TANPA menggeser SL ke BEP
         h1_tp1_cands = []
         if map1:
-            h1_tp1_cands.extend(map1["eql"])
-            h1_tp1_cands.extend([s["price"] for s in map1["lows"][-8:]])
+            h1_tp1_cands.extend(map1.get("eql", []))
+            h1_tp1_cands.extend([s["price"] for s in map1.get("lows", [])[-8:]])
         h1_tp1_cands.append(w_eq)
         valid_tp1 = sorted(
             [x for x in h1_tp1_cands if plan_entry - 0.68 * max(plan_entry - tp2, 0) <= x <= plan_entry - 1.30 * risk],
@@ -887,6 +1012,11 @@ def _compute_trade_geometry(
             tp3 = max(min(runner_cands), max(plan_entry * 0.25, plan_entry - 8.0 * risk))
         else:
             tp3 = max(plan_entry * 0.25, min(tp2 - 1.2 * risk, struct_floor))
+
+        if req_struct_tp2 or path_clear:
+            tp2 = min(tp2, plan_entry - 0.02 * atr_1h)
+            tp1 = max(tp1, plan_entry - 0.68 * (plan_entry - tp2))
+            tp3 = min(tp3, tp2 - 1.2 * risk)
 
     rr = (tp2 - plan_entry) / risk if d == 1 else (plan_entry - tp2) / risk
     rr = max(0.0, rr)
