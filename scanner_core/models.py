@@ -59,6 +59,10 @@ class Config:
     min_rr: float = 3.0             # wajib R:R efektif minimal 1:3.0 (jika kurang -> REJECT)
     require_structural_tp2: bool = True  # wajib TP2 dari struktur nyata >= 3R (tanpa fallback 3.1R)
     path_clear_check: bool = True   # cek koridor entry->TP2 bersih dari zona lawan 1H/4H
+    sl_wick_floor: bool = True      # lantai buffer SL adaptif dari persentil-80 kedalaman sweep 15M
+    sl_wick_mult: float = 1.2       # pengali ekskursi wick 15M untuk lantai buffer SL
+    reach_cap_empirical: bool = True  # batasi max_reach_dist dengan simpangan empiris 1H
+    reach_cap_pctl: float = 80.0    # persentil simpangan |close[t+hold]-close[t]| 1H
     fixed_sl_no_bep: bool = True    # Set-and-Forget SL di balik likuiditas (pantang geser SL ke BEP)
     entry_score: int = 80
     watch_score: int = 65

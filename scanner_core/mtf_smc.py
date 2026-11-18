@@ -608,6 +608,73 @@ def _cap_tp2_by_opposing_zones(
     return tp2, True, f"Jalur TP2 terhalang {z_lbl} ({fp(front)}, ruang {room_rr:.2f}R < 1:{min_rr:.1f})."
 
 
+def _wick_excursion(
+    d: int,
+    l_arr: np.ndarray,
+    h_arr: np.ndarray,
+    w: int = 8,
+    lookback: int = 96,
+    min_samples: int = 5,
+) -> float:
+    """
+    Mengukur kedalaman sapuan wick (sweep depth) pada 96 bar 15M terakhir terhadap
+    low (LONG) / high (SHORT) `w` bar sebelumnya; hanya mengambil sampel positif.
+    Mengembalikan persentil-80 jika sampel >= min_samples, selain itu 0.0.
+    """
+    a = l_arr if d == 1 else h_arr
+    if a is None or len(a) <= w:
+        return 0.0
+    ex: List[float] = []
+    start_i = max(w, len(a) - lookback)
+    for i in range(start_i, len(a)):
+        win = a[i - w : i]
+        ref = float(np.min(win)) if d == 1 else float(np.max(win))
+        val = float(a[i])
+        v = (ref - val) if d == 1 else (val - ref)
+        if not math.isnan(v) and v > 0.0:
+            ex.append(v)
+    if len(ex) < min_samples:
+        return 0.0
+    res = float(np.percentile(ex, 80))
+    return res if (not math.isnan(res) and res > 0.0) else 0.0
+
+
+def _empirical_reach(
+    map1_closes_or_df1,
+    hold_h: float = 30.0,
+    pctl: float = 80.0,
+) -> Optional[float]:
+    """
+    Menghitung persentil `pctl` dari |close[t+hold_h] - close[t]| pada seluruh bar 1H
+    yang tersedia (minimal 60 sampel; jika kurang, kembalikan None) dalam satuan harga.
+    """
+    if map1_closes_or_df1 is None:
+        return None
+    if isinstance(map1_closes_or_df1, pd.DataFrame):
+        if "close" not in map1_closes_or_df1.columns:
+            return None
+        c_arr = map1_closes_or_df1["close"].values.astype(float)
+    elif isinstance(map1_closes_or_df1, dict):
+        if "close" in map1_closes_or_df1:
+            c_arr = np.asarray(map1_closes_or_df1["close"], dtype=float)
+        elif "closes" in map1_closes_or_df1:
+            c_arr = np.asarray(map1_closes_or_df1["closes"], dtype=float)
+        else:
+            return None
+    else:
+        c_arr = np.asarray(map1_closes_or_df1, dtype=float)
+
+    k = max(1, int(round(float(hold_h))))
+    if len(c_arr) <= k:
+        return None
+    diffs = np.abs(c_arr[k:] - c_arr[:-k])
+    diffs = diffs[~np.isnan(diffs)]
+    if len(diffs) < 60:
+        return None
+    val = float(np.percentile(diffs, float(pctl)))
+    return val if (not math.isnan(val) and val > 0.0) else None
+
+
 def _compute_trade_geometry(
     d: int,
     archetype: str,
@@ -634,6 +701,7 @@ def _compute_trade_geometry(
     htf_pts: float,
     cur_rv: float,
     rev_ctx: Optional[dict] = None,
+    reach_hist: Optional[float] = None,
 ) -> dict:
     """
     Menghitung geometri Entry, Structural SL ('Zoom-Out Check' ATR 1H),
@@ -737,7 +805,13 @@ def _compute_trade_geometry(
                 liq_guard_info = f"SL diamankan di balik {liq_lbl} ({fp(liq_lvl)}) — tahan Judas Swing"
 
         buf_mult = 0.18 if archetype == "HTF_REVERSAL" else cfg.sl_buffer
-        sl_struct = anchor_low - buf_mult * atr_1h
+        base_buf = buf_mult * atr_1h
+        use_wick_floor = bool(getattr(cfg, "sl_wick_floor", True))
+        wick_exc = _wick_excursion(d, l_arr, h_arr) if use_wick_floor else 0.0
+        wick_buf = float(getattr(cfg, "sl_wick_mult", 1.2)) * wick_exc
+        wick_floor_active = use_wick_floor and (wick_buf > base_buf)
+        eff_buf = max(base_buf, wick_buf) if use_wick_floor else base_buf
+        sl_struct = anchor_low - eff_buf
         raw_dist = max(0.0, plan_entry - sl_struct)
         if raw_dist > max_sl_dist * 1.15:
             sl_too_wide = True
@@ -794,7 +868,13 @@ def _compute_trade_geometry(
 
         # Beri ruang ekstra untuk SHORT Reversal karena wick short squeeze sering lebih tajam (0.24x ATR 1H)
         buf_mult = 0.24 if archetype == "HTF_REVERSAL" else cfg.sl_buffer
-        sl_struct = anchor_high + buf_mult * atr_1h
+        base_buf = buf_mult * atr_1h
+        use_wick_floor = bool(getattr(cfg, "sl_wick_floor", True))
+        wick_exc = _wick_excursion(d, l_arr, h_arr) if use_wick_floor else 0.0
+        wick_buf = float(getattr(cfg, "sl_wick_mult", 1.2)) * wick_exc
+        wick_floor_active = use_wick_floor and (wick_buf > base_buf)
+        eff_buf = max(base_buf, wick_buf) if use_wick_floor else base_buf
+        sl_struct = anchor_high + eff_buf
         raw_dist = max(0.0, sl_struct - plan_entry)
         if raw_dist > max_sl_dist * 1.15:
             sl_too_wide = True
@@ -805,12 +885,22 @@ def _compute_trade_geometry(
     sl_atr_1h_ratio = risk / max(atr_1h, 1e-12)
     if not liq_guard_info:
         liq_guard_info = f"SL Struktural 1H ({sl_atr_1h_ratio:.2f}x ATR 1H)"
+    if wick_floor_active:
+        wick_atr_ratio = eff_buf / max(atr_1h, 1e-12)
+        liq_guard_info = f"{liq_guard_info} | buffer wick adaptif {wick_atr_ratio:.2f} ATR1H (wick_exc={fp(wick_exc)})"
 
     # --- TARGET TP1 (CHECKPOINT H1), TP2 (EQUILIBRIUM 4H / STRUKTUR >= 1:3.0), & TP3 (SUPPLY/DEMAND 4H / PDH-PDL) ---
     vel_factor = 0.50 if (cur_rv >= 1.4 and htf_pts >= 14.0) else 0.44
     hourly_vel = max(vel_factor * atr_1h, 1e-12)
     eff_max_hold = max(float(getattr(cfg, "max_hold_hours", 30.0)), 18.0)
     max_reach_dist = eff_max_hold * hourly_vel
+    if (
+        getattr(cfg, "reach_cap_empirical", True)
+        and reach_hist is not None
+        and not math.isnan(float(reach_hist))
+        and float(reach_hist) > 0.0
+    ):
+        max_reach_dist = min(max_reach_dist, float(reach_hist))
     target_min_rr = max(float(getattr(cfg, "min_rr", 3.0)), 3.0)
     eq_4h = (r4_lo + r4_hi) / 2.0
 
@@ -1290,6 +1380,12 @@ def analyze_smc_symbol(
     atr_1h = map1["atr"] if map1 else float(ctx1.get("atr", cur_atr * 2.1))
     if math.isnan(atr_1h) or atr_1h <= 0:
         atr_1h = cur_atr * 2.1
+    eff_hold_1h = max(float(getattr(cfg, "max_hold_hours", 30.0)), 18.0)
+    reach_hist_1h = (
+        _empirical_reach(df1, eff_hold_1h, float(getattr(cfg, "reach_cap_pctl", 80.0)))
+        if (df1 is not None and getattr(cfg, "reach_cap_empirical", True))
+        else None
+    )
 
     # =================================================================
     # LAPIS 3 (15M): STRUKTUR MIKRO, SWEEP, TRIGGER, & ORDERFLOW
@@ -1769,7 +1865,7 @@ def analyze_smc_symbol(
         geom_c = _compute_trade_geometry(
             d_cont, "TREND_CONT", cur_p, p_lo, p_hi, htf_poi, app_code_c, symbol, cfg,
             atr_1h, cur_atr, w_low, w_high, w_eq, r4_lo, r4_hi, wall_supply_4h, wall_demand_4h,
-            map1, map15, l, h, htf_pts_c, cur_rv,
+            map1, map15, l, h, htf_pts_c, cur_rv, reach_hist=reach_hist_1h,
         )
 
         confs_c: List[str] = [poi_label or ("1H/15M Demand Zone" if d_cont == 1 else "1H/15M Supply Zone"), zone_pos_lbl]
@@ -2079,7 +2175,7 @@ def analyze_smc_symbol(
         geom_p = _compute_trade_geometry(
             d_pre, "PRE_REACTION", cur_p, p_lo, p_hi, chosen_htf, app_code_p, symbol, cfg,
             atr_1h, cur_atr, w_low, w_high, w_eq, r4_lo, r4_hi, wall_supply_4h, wall_demand_4h,
-            map1, map15, l, h, htf_p, cur_rv,
+            map1, map15, l, h, htf_p, cur_rv, reach_hist=reach_hist_1h,
         )
         ref_edge_dist = (cur_p - geom_p["poi_high"]) if d_pre == 1 else (geom_p["poi_low"] - cur_p)
         if (
@@ -2532,7 +2628,7 @@ def analyze_smc_symbol(
         geom_r = _compute_trade_geometry(
             d_rev, "HTF_REVERSAL", cur_p, p_lo, p_hi, wall_z, app_code_r, symbol, cfg,
             atr_1h, cur_atr, w_low, w_high, w_eq, r4_lo, r4_hi, wall_supply_4h, wall_demand_4h,
-            map1, map15, l, h, htf_r, cur_rv, rev_ctx=rev_ctx_dict,
+            map1, map15, l, h, htf_r, cur_rv, rev_ctx=rev_ctx_dict, reach_hist=reach_hist_1h,
         )
 
         rr_r = geom_r["rr"]

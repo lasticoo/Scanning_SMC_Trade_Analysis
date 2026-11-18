@@ -402,6 +402,27 @@ Footer: Korelasi bukan kausalitas; banyak perbandingan menghasilkan temuan palsu
 
 ---
 
+### MODUL M03 — SL Buffer Berbasis Wick & Realisme Jarak Jangkau (P1)
+- **File & Fungsi yang diubah**:
+  - `scanner_core/models.py`: Menambahkan `sl_wick_floor: bool = True`, `sl_wick_mult: float = 1.2`, `reach_cap_empirical: bool = True`, dan `reach_cap_pctl: float = 80.0` ke `Config`.
+  - `scanner_core/mtf_smc.py`:
+    - **B6 (`_wick_excursion`)**: Mengukur kedalaman sapuan wick (sweep depth) pada 96 bar 15M terakhir terhadap low (LONG) / high (SHORT) 8 bar sebelumnya (hanya sampel positif `v > 0`; persentil-80 bila `>= 5` sampel, selain itu `0.0`). Di `_compute_trade_geometry`, `sl_struct = anchor -/+ max(buf_mult*atr_1h, cfg.sl_wick_mult * wick_exc)` bila `cfg.sl_wick_floor`, serta menulis `"buffer wick adaptif X.XX ATR1H (wick_exc=...)"` ke `liq_guard_info` bila lantai wick menaikkan buffer.
+    - **B4 (`_empirical_reach` & `reach_hist`)**: Menambahkan `_empirical_reach(map1_closes_or_df1, hold_h, pctl)` yang menghitung persentil-80 `|close[t+hold_h]-close[t]|` pada seluruh bar 1H (`>= 60` sampel; selain itu `None`). `analyze_smc_symbol` menghitung `reach_hist_1h` dari `df1` dan meneruskannya ke seluruh pemanggilan `_compute_trade_geometry` (`TREND_CONT`, `PRE_REACTION`, `HTF_REVERSAL`), yang membatasi `max_reach_dist = min(max_reach_dist, reach_hist)` bila `cfg.reach_cap_empirical`.
+  - `tools/audit/test_sl_reach.py`: Pengujian unit & regresi (a)–(d) untuk M03 serta pengukuran dampak pada 282 window sintetis.
+  - `tools/audit/test_geometry_path.py`: Menambahkan parameter opsional `reach_hist` pada helper referensi regresi M02 dan menonaktifkan flag M03 saat menguji isolasi regresi M02.
+- **Dampak pada data sintetis (`tools/audit/synth_data.py`, 282 window)**:
+  - **Pergeseran rata-rata `risk_pct`**: `4.102%` -> `4.525%` (`+10.30%`, di bawah batas `<= 15%`).
+  - **Di atas baseline M02** (sebelum M03 lolos `3/282` -> sesudah M03 lolos `1/282`):
+    - Berubah status karena **SL wick floor**: `0/282` (`0.00%` dari 282 | `0.0%` dari 3 lolos M02).
+    - Berubah status karena **Empirical reach cap**: `2/282` (`0.71%` dari 282 | `66.7%` dari 3 lolos M02).
+    - Kombinasi M03: `2/282` (`0.71%`).
+  - **Di atas baseline pra-M02** (sebelum M02/M03 lolos `39/282`):
+    - Berubah status karena **SL wick floor** saja: `6/282` (`2.13%` dari 282 | `15.4%` dari 39 lolos, di bawah batas risiko `30%`).
+    - Berubah status karena **Empirical reach cap** saja: `8/282` (`2.84%` dari 282 | `20.5%` dari 39 lolos).
+  - Regresi kedua flag M03 `False` (`sl_wick_floor=False, reach_cap_empirical=False`): `282/282` window `100%` identik dengan sebelum M03.
+
+---
+
 ## 3. Penyimpangan dari Spesifikasi
 
 - **Fase 4**: Logging JSONL per setup dikerjakan atas instruksi langsung pemilik repo, di luar spesifikasi tertulis awal yang menahannya. Selain itu, file referensi opsional `smc_update_develop2.patch` dan `audit_report.md` tidak tersedia di direktori kerja, sehingga seluruh implementasi mengacu langsung ke spesifikasi tertulis dan kondisi kode `2eeb6fd`..`412fbdc`.

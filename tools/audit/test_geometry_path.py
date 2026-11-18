@@ -60,6 +60,7 @@ def _legacy_compute_trade_geometry(
     htf_pts: float,
     cur_rv: float,
     rev_ctx: Optional[dict] = None,
+    reach_hist: Optional[float] = None,
 ) -> dict:
     """Reference copy of pre-M02 _compute_trade_geometry for exact regression verification."""
     notes = []
@@ -748,7 +749,12 @@ def test_d_random_200_ordering_invariant() -> None:
 
 
 def test_e_both_flags_false_regression_and_synth_impact() -> None:
-    cfg_off = Config(require_structural_tp2=False, path_clear_check=False)
+    cfg_off = Config(
+        require_structural_tp2=False,
+        path_clear_check=False,
+        sl_wick_floor=False,
+        reach_cap_empirical=False,
+    )
     scenarios = _generate_200_random_scenarios(seed=20261118)
 
     for idx, sc in enumerate(scenarios):
@@ -765,7 +771,12 @@ def test_e_both_flags_false_regression_and_synth_impact() -> None:
     # 1) Verify 282/282 identical when both flags are False
     # 2) Measure pass -> REJECT impact of B1 alone, B2 alone, B3 alone, and M02 combined
     cases = iter_synthetic_windows()
-    cfg_all_on = Config(require_structural_tp2=True, path_clear_check=True)
+    cfg_all_on = Config(
+        require_structural_tp2=True,
+        path_clear_check=True,
+        sl_wick_floor=False,
+        reach_cap_empirical=False,
+    )
 
     ident_282 = 0
     base_pass_ids = set()
