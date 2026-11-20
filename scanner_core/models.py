@@ -63,6 +63,11 @@ class Config:
     sl_wick_mult: float = 1.2       # pengali ekskursi wick 15M untuk lantai buffer SL
     reach_cap_empirical: bool = True  # batasi max_reach_dist dengan simpangan empiris 1H
     reach_cap_pctl: float = 80.0    # persentil simpangan |close[t+hold]-close[t]| 1H
+    ai_protect_high_python: bool = True      # larang LLM memveto (REJECT) sinyal Python skor >= 75 & RR >= 3.0
+    limit_ce_fallback: bool = True           # evaluasi fallback R:R dari limit_entry (Mid CE 50% POI) bila RR harga pasar < 3.0
+    allow_high_score_ob_retest: bool = True  # izinkan SMC_OB_RETEST / Breaker / Sweep skor Python >= 75 lolos di focus_3_pillars
+    prefer_realistic_tp2: bool = True        # utamakan TP2 struktural di rentang realistis 3.0R-4.2R (target >4.2R ke TP3)
+    strict_counter_btc_reversal: bool = True # perketat HTF_REVERSAL yang melawan arah BTC 4H (wajib MSS H1 / Rel. Strength)
     fixed_sl_no_bep: bool = True    # Set-and-Forget SL di balik likuiditas (pantang geser SL ke BEP)
     entry_score: int = 80
     watch_score: int = 65

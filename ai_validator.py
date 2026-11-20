@@ -848,8 +848,12 @@ def audit_top_setups(
             sc_r = float(getattr(r, "score", 0.0))
             if arch_r == "HTF_REVERSAL" and sc_r >= 60.0:
                 return True
-            if arch_r == "TREND_CONT" and bool(raw_r.get("htf_aligned", False)) and getattr(r, "kind", "") == "SMC_SNIPER" and sc_r >= 70.0:
-                return True
+            allow_ob = bool(getattr(cfg, "allow_high_score_ob_retest", True))
+            if arch_r == "TREND_CONT" and bool(raw_r.get("htf_aligned", False)):
+                if getattr(r, "kind", "") == "SMC_SNIPER" and sc_r >= 70.0:
+                    return True
+                if allow_ob and sc_r >= 75.0:
+                    return True
         return False
 
     candidates = [r for r in results if _is_ai_eligible(r)]
@@ -902,6 +906,44 @@ def audit_top_setups(
                         file=sys.stderr,
                     )
                     continue
+
+                py_sc = float(getattr(s, "python_score", getattr(s, "score", 0.0)))
+                py_st_orig = str(getattr(s, "status", "REJECT"))
+                raw_s = getattr(s, "raw_market_data", None)
+                if isinstance(raw_s, dict):
+                    raw_s["python_status_before_ai"] = py_st_orig
+
+                # Proteksi Skor Tinggi Python (>= 75) & Disiplin Promosi AI:
+                arch_s = str(getattr(s, "archetype", "TREND_CONT"))
+                rev_st_num = int((raw_s or {}).get("rev_stage_num", 0)) if isinstance(raw_s, dict) else 0
+                blk_wall = bool((raw_s or {}).get("blocked_by_wall", False)) if isinstance(raw_s, dict) else False
+                if (
+                    py_sc >= 75.0
+                    and float(getattr(s, "rr", 0.0)) >= 2.98
+                    and not blk_wall
+                    and (arch_s in ("TREND_CONT", "PRE_REACTION") or (arch_s == "HTF_REVERSAL" and rev_st_num >= 3))
+                    and (res.get("decision") == "REJECTED" or res.get("status") == "REJECT")
+                ):
+                    res["decision"] = "CONDITIONAL"
+                    res["smc_score"] = max(int(round(py_sc)), int(res.get("smc_score", 75)))
+                    res["status"] = (
+                        "PRE-TAP LIMIT"
+                        if arch_s == "PRE_REACTION"
+                        else ("REVERSAL WATCH" if arch_s == "HTF_REVERSAL" else "WATCHLIST")
+                    )
+                    res["execution_style"] = "LIMIT_PRE_TAP" if arch_s == "PRE_REACTION" else "WAIT_SWEEP_TRIGGER"
+                    res["detailed_analysis"] = (
+                        f"[Proteksi Skor Python {py_sc:.0f}/100: Veto AI ditahan ke {res['status']} (Tunggu Limit/Sweep POI)] "
+                        + str(res.get("detailed_analysis", ""))
+                    )
+                elif py_st_orig == "REJECT":
+                    if res.get("status") == "ENTRY READY":
+                        res["status"] = "REVERSAL WATCH" if arch_s == "HTF_REVERSAL" else "WATCHLIST"
+                        res["execution_style"] = "WAIT_SWEEP_TRIGGER"
+                    if py_sc < 72.0 and arch_s == "HTF_REVERSAL" and rev_st_num < 3:
+                        res["decision"] = "REJECTED"
+                        res["status"] = "REJECT"
+                        res["execution_style"] = "SKIP"
 
                 s.smc_elements = res.get("smc_elements", {})
                 s.score = float(res["smc_score"])

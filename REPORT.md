@@ -688,3 +688,36 @@ Balas HANYA JSON valid murni dlm Bahasa Indonesia lugas (tiap sub-elemen smc_ele
   "flip_scenario": "Syarat Pembatalan (Cancel/Flip): level close H1/4H di luar sweep/POI, batas waktu 20 bar H1 MSS, atau skenario balik arah jika invalid"
 }
 ```
+
+---
+
+## Pembaruan Pasca-Review Data Live & Modul M01–M03
+
+### 1. Ringkasan Modul M01–M03
+- **M01 (`tracker.py`, `scanner_core/version.py`, `scanner_core/models.py`)**:
+  - `CODE_VERSION` & `cfg_hash(cfg)` dicatat di tiap entry `setups_audit.jsonl`.
+  - Filter `--since-version` dievaluasi sebelum deduplikasi cooldown 8 jam.
+  - Default `Config.max_hold_hours = 30.0` digunakan secara konsisten di tracker (override 60 jam dihapus).
+- **M02 (`scanner_core/mtf_smc.py`, `scanner_core/models.py`)**:
+  - **B1**: Menghapus ambang buta `0.30 * atr_1h` pada tembok 4H di depan entry (`wall_cap` selalu aktif bila tembok 4H berada di depan entry).
+  - **B2 (`require_structural_tp2: bool = True`)**: Melarang TP2 sintetis `3.1R` di ruang kosong bila tidak ada kandidat struktural `>= 3.0R`.
+  - **B3 (`path_clear_check: bool = True`)**: Memeriksa koridor 1H (`bear_obs`/`bull_obs`, `breakers`, dan `fvgs` besar `>= 0.35 * atr_1h` dengan `touches <= 1`) di antara entry dan TP2.
+  - **B5**: Menjamin invariansi urutan `SL < Entry < TP1 < TP2 <= TP3` (LONG) dan `SL > Entry > TP1 > TP2 >= TP3` (SHORT).
+- **M03 (`scanner_core/mtf_smc.py`, `scanner_core/models.py`)**:
+  - **B6 (`sl_wick_floor: bool = True`)**: Menambahkan `_wick_excursion` (persentil-80 kedalaman sweep positif 8-bar dalam 96 bar 15M terakhir, `min_samples=5`) sebagai lantai adaptif buffer SL (`max(buf_mult * atr_1h, 1.2 * wick_exc)`).
+  - **B4 (`reach_cap_empirical: bool = True`)**: Menambahkan `_empirical_reach` (persentil-85 perpindahan searah 1H dalam window `round(eff_max_hold)` pada 180 bar 1H terakhir, dikalikan `1.10`) sebagai batas atas `max_reach_dist`.
+
+### 2. Penerapan 5 Saran Optimasi Berbasis Data Trading Live (Dikunci untuk Modul Berikutnya)
+Sesuai instruksi user, lima perbaikan berikut telah diterapkan langsung ke sistem (dengan tetap mempertahankan `max_hold_hours = 30.0`) dan **dikunci agar tidak ditimpa oleh modul berikutnya tanpa pemberitahuan terlebih dahulu**:
+1. **Proteksi Setup Skor Tinggi Python dari Veto LLM (`ai_protect_high_python: bool = True` di `Config` & `ai_validator.py`)**:
+   - Mencegah LLM mem-veto (`REJECTED`) setup yang sudah memiliki skor objektif Python tinggi (`python_score >= 75.0`, `rr >= 2.98`, tidak terhalang tembok, pada `TREND_CONT`/`PRE_REACTION` atau `HTF_REVERSAL` tahap `>= 3`); setup tersebut ditahan sebagai `CONDITIONAL` (`WATCHLIST` / `PRE-TAP LIMIT` / `REVERSAL WATCH`) dan skor tidak diturunkan di bawah `python_score`.
+   - Mencegah LLM mempromosikan setup yang sudah berstatus `REJECT` di Python langsung menjadi `ENTRY READY` (serta menahan promosi counter-trend `HTF_REVERSAL` tahap `< 3` dengan skor Python `< 72`).
+2. **Fallback Geometri ke Limit CE 50% POI (`limit_ce_fallback: bool = True` di `Config` & `scanner_core/mtf_smc.py`)**:
+   - Pada `TREND_CONT` dan `HTF_REVERSAL`, bila evaluasi dari harga market (`cur_p`) menghasilkan `rr < cfg.min_rr` atau terhalang tembok karena harga sudah bergerak sedikit menjauhi Mid/CE 50% POI (`limit_entry`, dalam jarak `<= 0.60–0.65 * atr_1h`), sistem mengevaluasi ulang geometri dari `limit_entry`. Bila dari `limit_entry` diperoleh `rr >= cfg.min_rr` dengan jalur bersih dan SL tidak terlalu lebar, setup dialihkan ke rencana limit (`WATCHLIST` / `LIMIT_RETEST` atau `REVERSAL WATCH`) alih-alih langsung di-`REJECT`.
+3. **Pembukaan Kembali Follow-Trend OB Retest / Breaker / FVG Skor Tinggi (`allow_high_score_ob_retest: bool = True` di `Config`, `scanner_core/mtf_smc.py`, & `ai_validator.py`)**:
+   - Pada mode `focus_3_pillars`, setup `TREND_CONT` yang 100% searah tren HTF (`htf_aligned`) dengan jenis `SMC_OB_RETEST`, `SMC_BREAKER`, `SMC_FVG_FILL`, atau `SMC_SWEEP` dan skor tinggi (`tot_c >= 75.0`, dekat POI `<= 0.35 * atr_1h`, `rr >= cfg.min_rr`) diizinkan masuk sebagai `WATCHLIST` (atau `ENTRY READY` bila zona segar `tot_c >= 78.0`, di POI, dan candle menolak) serta ikut dievaluasi di `_is_ai_eligible`.
+4. **Target TP2 Struktural Realistis 3.0R–4.2R (`prefer_realistic_tp2: bool = True` di `Config` & `scanner_core/mtf_smc.py`)**:
+   - Mengutamakan kandidat TP2 struktural di rentang realistis `3.0R – 4.2R` (`sweet_cap_r = 4.2`). Pada `HTF_REVERSAL`, sistem tidak lagi memaksakan `tp2 = eq_4h` bila `eq_4h > 4.2R` sementara ada struktur valid yang lebih dekat (`3.0R – 4.2R`), melainkan menjadikan `eq_4h` sebagai kandidat `TP3 Runner`.
+5. **Filter Ketat Counter-Trend terhadap Struktur BTC 4H (`strict_counter_btc_reversal: bool = True` di `Config` & `scanner_core/mtf_smc.py`)**:
+   - Pada `HTF_REVERSAL` yang melawan arah struktur BTC 4H (`not btc_aligned`), status `ENTRY READY` mewajibkan `stage3_mss_h1_ok` dan `rel_vs_btc_ok` (jika belum, ditahan di `REVERSAL WATCH`), serta `REVERSAL WATCH` tanpa dukungan BTC maupun relative strength/weakness mewajibkan `stage2_sweep_ok`, konfirmasi struktur (`stage3_mss_h1_ok` / `has_m15_choch_disp` / `is_double_sweep`), dan skor `>= 72.0`.
+

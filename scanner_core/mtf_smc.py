@@ -945,11 +945,17 @@ def _compute_trade_geometry(
             reach_ceiling = min(reach_ceiling, wall_cap)
 
         valid_tp2 = sorted([x for x in cands_tp if (plan_entry + target_min_rr * risk) <= x <= reach_ceiling])
-        if archetype == "HTF_REVERSAL" and (plan_entry + target_min_rr * risk) <= eq_4h <= reach_ceiling:
-            # Tahap 6 Reversal Watch: utamakan Equilibrium 4H sebagai TP2 jika sudah memenuhi >= 1:3.0 R:R
+        pref_real_tp2 = (req_struct_tp2 or path_clear) and bool(getattr(cfg, "prefer_realistic_tp2", True))
+        sweet_cap_r = 4.2 if pref_real_tp2 else 4.8
+        if (
+            archetype == "HTF_REVERSAL"
+            and (plan_entry + target_min_rr * risk) <= eq_4h <= reach_ceiling
+            and (not pref_real_tp2 or eq_4h <= plan_entry + sweet_cap_r * risk or not valid_tp2)
+        ):
+            # Tahap 6 Reversal Watch: utamakan Equilibrium 4H sebagai TP2 jika sudah memenuhi >= 1:3.0 R:R dan masih realistis
             tp2 = eq_4h
         elif valid_tp2:
-            sweet_tp2 = [x for x in valid_tp2 if x <= plan_entry + 4.8 * risk]
+            sweet_tp2 = [x for x in valid_tp2 if x <= plan_entry + sweet_cap_r * risk]
             tp2 = sweet_tp2[0] if sweet_tp2 else min(valid_tp2[0], reach_ceiling)
         else:
             if req_struct_tp2:
@@ -1044,11 +1050,17 @@ def _compute_trade_geometry(
             reach_floor = max(reach_floor, wall_cap)
 
         valid_tp2 = sorted([x for x in cands_tp if reach_floor <= x <= (plan_entry - target_min_rr * risk)], reverse=True)
-        if archetype == "HTF_REVERSAL" and reach_floor <= eq_4h <= (plan_entry - target_min_rr * risk):
-            # Tahap 6 Reversal Watch SHORT: utamakan Equilibrium 4H sebagai TP2 jika sudah memenuhi >= 1:3.0 R:R
+        pref_real_tp2 = (req_struct_tp2 or path_clear) and bool(getattr(cfg, "prefer_realistic_tp2", True))
+        sweet_cap_r = 4.2 if pref_real_tp2 else 4.8
+        if (
+            archetype == "HTF_REVERSAL"
+            and reach_floor <= eq_4h <= (plan_entry - target_min_rr * risk)
+            and (not pref_real_tp2 or eq_4h >= plan_entry - sweet_cap_r * risk or not valid_tp2)
+        ):
+            # Tahap 6 Reversal Watch SHORT: utamakan Equilibrium 4H sebagai TP2 jika sudah memenuhi >= 1:3.0 R:R dan masih realistis
             tp2 = eq_4h
         elif valid_tp2:
-            sweet_tp2 = [x for x in valid_tp2 if x >= plan_entry - 4.8 * risk]
+            sweet_tp2 = [x for x in valid_tp2 if x >= plan_entry - sweet_cap_r * risk]
             tp2 = sweet_tp2[0] if sweet_tp2 else max(valid_tp2[0], reach_floor)
         else:
             if req_struct_tp2:
@@ -1867,6 +1879,35 @@ def analyze_smc_symbol(
             atr_1h, cur_atr, w_low, w_high, w_eq, r4_lo, r4_hi, wall_supply_4h, wall_demand_4h,
             map1, map15, l, h, htf_pts_c, cur_rv, reach_hist=reach_hist_1h,
         )
+        used_limit_ce_c = False
+        if (
+            (bool(getattr(cfg, "require_structural_tp2", True)) or bool(getattr(cfg, "path_clear_check", True)))
+            and bool(getattr(cfg, "limit_ce_fallback", True))
+            and (geom_c["rr"] < cfg.min_rr or geom_c.get("blocked_by_wall", False))
+        ):
+            ce_c = float(geom_c.get("limit_entry", (p_lo + p_hi) * 0.5))
+            ce_dist_ok = (
+                (d_cont == 1 and ce_c < cur_p and (cur_p - ce_c) <= 0.60 * atr_1h)
+                or (d_cont == -1 and ce_c > cur_p and (ce_c - cur_p) <= 0.60 * atr_1h)
+            )
+            if ce_dist_ok:
+                geom_ce = _compute_trade_geometry(
+                    d_cont, "TREND_CONT", ce_c, p_lo, p_hi, htf_poi, app_code_c, symbol, cfg,
+                    atr_1h, cur_atr, w_low, w_high, w_eq, r4_lo, r4_hi, wall_supply_4h, wall_demand_4h,
+                    map1, map15, l, h, htf_pts_c, cur_rv, reach_hist=reach_hist_1h,
+                )
+                if (
+                    geom_ce["rr"] >= cfg.min_rr
+                    and not geom_ce.get("blocked_by_wall", False)
+                    and not geom_ce.get("sl_too_wide", False)
+                ):
+                    geom_ce["market_price"] = cur_p
+                    geom_ce["at_poi"] = geom_c["at_poi"]
+                    geom_ce["notes"].append(
+                        f"Limit CE 50% POI ({fp(ce_c)}) memperbaiki R:R dari 1:{geom_c['rr']:.1f} menjadi 1:{geom_ce['rr']:.1f}."
+                    )
+                    geom_c = geom_ce
+                    used_limit_ce_c = True
 
         confs_c: List[str] = [poi_label or ("1H/15M Demand Zone" if d_cont == 1 else "1H/15M Supply Zone"), zone_pos_lbl]
         if d_cont == 1:
@@ -1992,9 +2033,25 @@ def analyze_smc_symbol(
                 and not sl_too_wide_c
                 and hold_ok_c
             )
-            if is_sniper_pillar or is_first_touch_fvg:
+            allow_ob_pillar = (
+                (bool(getattr(cfg, "require_structural_tp2", True)) or bool(getattr(cfg, "path_clear_check", True)))
+                and bool(getattr(cfg, "allow_high_score_ob_retest", True))
+            )
+            is_high_score_htf_poi = (
+                allow_ob_pillar
+                and kind_c in ("SMC_OB_RETEST", "SMC_BREAKER", "SMC_FVG_FILL", "SMC_SWEEP")
+                and htf_aligned
+                and tot_c >= 75.0
+                and dist_from_edge <= 0.35 * atr_1h
+                and not blocked_by_4h_wall
+                and not sl_too_wide_c
+                and hold_ok_c
+            )
+            if is_sniper_pillar or is_first_touch_fvg or is_high_score_htf_poi:
                 if (
                     geom_c["at_poi"]
+                    and not used_limit_ce_c
+                    and (is_sniper_pillar or is_first_touch_fvg or (z_fresh_c and tot_c >= 78.0))
                     and candle_rejected
                     and htf_aligned
                     and not blocked_by_4h_wall
@@ -2007,11 +2064,16 @@ def analyze_smc_symbol(
                     status_c = "ENTRY READY"
                     exec_c = "ENTRY_NOW"
                     tier_c = 0
-                elif is_sniper_pillar and rr_c >= cfg.min_rr and tp2_move_pct >= 1.4:
+                elif (is_sniper_pillar or is_high_score_htf_poi) and rr_c >= cfg.min_rr and tp2_move_pct >= 1.4:
                     status_c = "WATCHLIST"
-                    exec_c = "WAIT_SWEEP_TRIGGER"
-                    tier_c = 2
-                    notes_c.append("SMC Sniper Follow-Trend di POI namun candle 15M terakhir belum menutup searah pantulan; tunggu close konfirmasi.")
+                    exec_c = "LIMIT_RETEST" if (used_limit_ce_c or not geom_c["at_poi"]) else "WAIT_SWEEP_TRIGGER"
+                    tier_c = 1 if (is_sniper_pillar or tot_c >= 78.0) else 2
+                    if used_limit_ce_c:
+                        notes_c.append(f"Pasang Limit Entry di Mid/CE 50% POI ({fp(geom_c['plan_entry'])}) untuk R:R optimal 1:{rr_c:.1f}.")
+                    elif is_sniper_pillar:
+                        notes_c.append("SMC Sniper Follow-Trend di POI namun candle 15M terakhir belum menutup searah pantulan; tunggu close konfirmasi.")
+                    else:
+                        notes_c.append(f"Follow-Trend POI ({kind_c}) skor tinggi ({tot_c:.1f}) di sekitar zona; tunggu trigger/retest limit.")
                 else:
                     status_c = "REJECT"
                     exec_c = "SKIP"
@@ -2630,6 +2692,35 @@ def analyze_smc_symbol(
             atr_1h, cur_atr, w_low, w_high, w_eq, r4_lo, r4_hi, wall_supply_4h, wall_demand_4h,
             map1, map15, l, h, htf_r, cur_rv, rev_ctx=rev_ctx_dict, reach_hist=reach_hist_1h,
         )
+        used_limit_ce_r = False
+        if (
+            (bool(getattr(cfg, "require_structural_tp2", True)) or bool(getattr(cfg, "path_clear_check", True)))
+            and bool(getattr(cfg, "limit_ce_fallback", True))
+            and (geom_r["rr"] < cfg.min_rr or geom_r.get("blocked_by_wall", False))
+        ):
+            ce_r = float(geom_r.get("limit_entry", (p_lo + p_hi) * 0.5))
+            ce_dist_ok_r = (
+                (d_rev == 1 and ce_r < cur_p and (cur_p - ce_r) <= 0.65 * atr_1h)
+                or (d_rev == -1 and ce_r > cur_p and (ce_r - cur_p) <= 0.65 * atr_1h)
+            )
+            if ce_dist_ok_r:
+                geom_ce_r = _compute_trade_geometry(
+                    d_rev, "HTF_REVERSAL", ce_r, p_lo, p_hi, wall_z, app_code_r, symbol, cfg,
+                    atr_1h, cur_atr, w_low, w_high, w_eq, r4_lo, r4_hi, wall_supply_4h, wall_demand_4h,
+                    map1, map15, l, h, htf_r, cur_rv, rev_ctx=rev_ctx_dict, reach_hist=reach_hist_1h,
+                )
+                if (
+                    geom_ce_r["rr"] >= max(cfg.min_rr, 3.0)
+                    and not geom_ce_r.get("blocked_by_wall", False)
+                    and not geom_ce_r.get("sl_too_wide", False)
+                ):
+                    geom_ce_r["market_price"] = cur_p
+                    geom_ce_r["at_poi"] = geom_r["at_poi"]
+                    geom_ce_r["notes"].append(
+                        f"Limit CE 50% POI ({fp(ce_r)}) memperbaiki R:R dari 1:{geom_r['rr']:.1f} menjadi 1:{geom_ce_r['rr']:.1f}."
+                    )
+                    geom_r = geom_ce_r
+                    used_limit_ce_r = True
 
         rr_r = geom_r["rr"]
         tp2_pct_r = abs(geom_r["tp2"] - geom_r["plan_entry"]) / geom_r["plan_entry"] * 100.0
@@ -2800,8 +2891,29 @@ def analyze_smc_symbol(
             and tp2_pct_r >= 1.35
         )
 
+        strict_counter_btc = (
+            (bool(getattr(cfg, "require_structural_tp2", True)) or bool(getattr(cfg, "path_clear_check", True)))
+            and bool(getattr(cfg, "strict_counter_btc_reversal", True))
+        )
+        counter_btc_entry_ok = (
+            True
+            if (not strict_counter_btc or btc_aligned)
+            else bool(stage3_mss_h1_ok and rel_vs_btc_ok)
+        )
+        counter_btc_watch_ok = (
+            True
+            if (not strict_counter_btc or btc_aligned or rel_vs_btc_ok)
+            else bool(
+                stage2_sweep_ok
+                and (stage3_mss_h1_ok or has_m15_choch_disp or is_double_sweep)
+                and tot_rev >= max(min_watch_rev, 72.0)
+            )
+        )
+
         if (
             valid_rr_and_range
+            and not used_limit_ce_r
+            and counter_btc_entry_ok
             and stage5_m15_trigger_ok
             and candle_rej_r
             and tot_rev >= 80.0
@@ -2810,11 +2922,15 @@ def analyze_smc_symbol(
             exec_rev = "ENTRY_NOW"
             tier_rev = 0
             pat_rev = f"Reversal Watch SMC [{stage_lbl}] ({wall_z['tf']} {'Demand' if d_rev == 1 else 'Supply'} + Sweep + CHoCH M15)"
-        elif valid_rr_and_range and tot_rev >= min_watch_rev:
+        elif valid_rr_and_range and counter_btc_watch_ok and tot_rev >= min_watch_rev:
             status_rev = "REVERSAL WATCH"
             exec_rev = "WAIT_SWEEP_TRIGGER"
             tier_rev = 1 if (tot_rev >= 75.0 or stage_num >= 2 or in_poi_4h) else 2
             pat_rev = f"Reversal Watch SMC [{stage_lbl}] ({wall_z['kind']})"
+            if used_limit_ce_r:
+                notes_rev.append(f"Pasang Limit/Watch di Mid CE 50% POI ({fp(geom_r['plan_entry'])}) untuk R:R 1:{rr_r:.1f}.")
+            if strict_counter_btc and not btc_aligned and not counter_btc_entry_ok:
+                notes_rev.append("Counter-BTC 4H: tahan di Reversal Watch sampai MSS H1 + Relative Strength/Weakness vs BTC terkonfirmasi.")
             notes_rev.append(next_step_txt)
         else:
             status_rev = "REJECT"

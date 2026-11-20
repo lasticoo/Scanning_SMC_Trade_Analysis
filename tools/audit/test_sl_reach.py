@@ -286,8 +286,47 @@ def test_d_flags_false_regression_and_synth_impact() -> None:
     )
 
 
+def test_e_post_review_enhancements() -> None:
+    """
+    Test (e): Verify post-review recommendations (Saran 1-5):
+      - prefer_realistic_tp2 picks 3.0R-4.2R structural target over distant eq_4h (>4.2R)
+      - Config defaults: max_hold_hours == 30.0 (preserved), ai_protect_high_python == True,
+        limit_ce_fallback == True, allow_high_score_ob_retest == True,
+        prefer_realistic_tp2 == True, strict_counter_btc_reversal == True
+    """
+    cfg_default = Config()
+    assert cfg_default.max_hold_hours == 30.0, f"max_hold_hours must remain 30.0, got {cfg_default.max_hold_hours}"
+    assert cfg_default.ai_protect_high_python is True
+    assert cfg_default.limit_ce_fallback is True
+    assert cfg_default.allow_high_score_ob_retest is True
+    assert cfg_default.prefer_realistic_tp2 is True
+    assert cfg_default.strict_counter_btc_reversal is True
+
+    # Verify prefer_realistic_tp2 on HTF_REVERSAL when eq_4h > 4.2R and closer 3.4R structure exists
+    l_calm = np.full(110, 99.10, dtype=float)
+    h_calm = np.full(110, 100.90, dtype=float)
+    map1 = _empty_map1()
+    map1["eqh"] = [104.05]
+    map1["highs"] = [{"price": 104.05, "idx": 50}]
+    base = dict(
+        d=1, archetype="HTF_REVERSAL", cur_p=100.0, poi_low=99.2, poi_high=99.8, htf_poi=None,
+        approach_code="KOMPRESI_KOREKTIF", symbol="TESTUSDT", atr_1h=1.0, cur_atr=0.35,
+        w_low=96.0, w_high=112.0, w_eq=101.8, r4_lo=95.0, r4_hi=115.70,
+        wall_supply_4h=None, wall_demand_4h=None, map1=map1, map15=_empty_map15(),
+        l_arr=l_calm, h_arr=h_calm, htf_pts=18.0, cur_rv=1.2,
+    )
+    g_real = _compute_trade_geometry(cfg=Config(prefer_realistic_tp2=True, sl_wick_floor=False, reach_cap_empirical=False), **base)
+    g_far = _compute_trade_geometry(cfg=Config(prefer_realistic_tp2=False, sl_wick_floor=False, reach_cap_empirical=False), **base)
+    assert abs(g_real["tp2"] - 104.05) < 1e-6, f"Expected realistic TP2 104.05, got {g_real['tp2']}"
+    assert abs(g_far["tp2"] - 105.35) < 1e-6, f"Expected eq_4h TP2 105.35 when prefer_realistic_tp2=False, got {g_far['tp2']}"
+    print(
+        f"[PASS] Test (e): Post-review enhancements verified (prefer_realistic_tp2: {g_far['tp2']:.2f} [{g_far['rr']:.2f}R] -> {g_real['tp2']:.2f} [{g_real['rr']:.2f}R], max_hold_hours={cfg_default.max_hold_hours:.1f}h preserved)"
+    )
+
+
 if __name__ == "__main__":
     test_a_deep_wick_series_widens_sl()
     test_b_calm_series_zero_wick_exc_and_identical_sl()
     test_c_random_walk_empirical_reach_caps_tp2()
     test_d_flags_false_regression_and_synth_impact()
+    test_e_post_review_enhancements()
